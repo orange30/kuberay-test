@@ -25,11 +25,18 @@
 | 端点 | Live Session | 历史 Session | 缺失影响 |
 |-----|-------------|-------------|----------|
 | `GET /nodes?view=summary` | ✅ 代理到Head | ✅ 已实现 | 节点列表 |
-| `GET /nodes/{node_id}` | ✅ 代理到Head | ❌ NotImplemented | Dashboard 单节点详情页会失败 |
+| `GET /nodes/{node_id}` | ✅ 代理到Head | ✅ 已实现（增强版） | Dashboard 单节点详情页 |
 | `GET /api/v0/logs?node_id=xxx` | ✅ 代理到Head | ✅ 已实现 | 列出节点日志文件 |
-| `GET /api/v0/logs/file?node_id=xxx&filename=xxx` | ✅ 代理到Head | ❌ NotImplemented | **无法查看日志内容** |
+| `GET /api/v0/logs/file?node_id=xxx&filename=xxx` | ✅ 代理到Head | ✅ 已实现 | 日志内容查看 |
 
-**优先级**：🔴 **高**（日志查看是核心功能）
+**节点详情实现说明**:
+- 从 EventHandler 的 Actors 中提取节点 IP 地址
+- 从 EventHandler 的 Tasks 中获取该节点上运行的任务数
+- `numWorkers` 字段使用任务数作为近似值
+- 所有硬件指标（cpu、disk、memory）仍为 0（历史数据不可用）
+- 返回节点上的所有 actors 列表
+
+**说明**：历史Session的节点详情返回简化数据，包含节点ID和该节点的actors信息，但不包含实时指标（CPU、内存等）。
 
 ---
 
@@ -101,23 +108,21 @@
 ## 📊 总结统计
 
 ### 历史 Session API 实现状态
-- ✅ **已完成**：11个（前端路由4 + 集群2 + nodes 1 + logs 1 + tasks 2 + actors 2）
-- ❌ **缺失**：11个（node详情1 + 日志内容1 + jobs 2 + 集群状态2 + 监控2 + data/serve/placement 3）
+- ✅ **已完成**：14个（前端路由4 + 集群2 + 节点4 + tasks 2 + actors 2）
+- ❌ **缺失**：8个（jobs 2 + 集群状态2 + 监控2 + data/serve/placement 3）
 
 ### 按优先级分类的待实现 API
 
 #### 🔴 高优先级（影响核心功能）
-1. **`GET /api/v0/logs/file`** - 日志内容查看
-2. **`GET /api/jobs`** - Jobs列表
-3. **`GET /api/jobs/{job_id}`** - 单个Job详情
+1. **`GET /api/jobs`** - Jobs列表
+2. **`GET /api/jobs/{job_id}`** - 单个Job详情
 
 #### 🟡 中优先级（影响部分页面）
-4. `GET /nodes/{node_id}` - 单节点详情
-5. `GET /api/cluster_status` - 集群状态
-6. `GET /events` - 事件列表
-7. `GET /api/data/datasets/{job_id}` - Datasets
-8. `GET /api/serve/applications/` - Serve应用
-9. `GET /api/v0/placement_groups/` - Placement Groups
+3. `GET /api/cluster_status` - 集群状态
+4. `GET /events` - 事件列表
+5. `GET /api/data/datasets/{job_id}` - Datasets
+6. `GET /api/serve/applications/` - Serve应用
+7. `GET /api/v0/placement_groups/` - Placement Groups
 
 #### 🟢 低优先级（外部集成）
 10. `GET /api/grafana_health`
@@ -127,22 +132,26 @@
 
 ## 🎯 建议的实现顺序
 
-### 阶段1：核心功能恢复（立即）
+### 阶段1：核心功能恢复（✅ 已完成）
 ```go
-// 1. 实现日志文件读取（最紧急）
+// 1. 实现日志文件读取 ✅
 func (s *ServerHandler) getNodeLogFile(...)
     // 从 storage reader 读取日志文件内容
 
-// 2. 实现Jobs API（可能需要EventHandler支持或从存储读取）
+// 2. 实现节点详情 ✅
+func (s *ServerHandler) getNode(...)
+    // 返回简化的节点信息 + actors
+```
+
+### 阶段2：Jobs API 实现（当前优先级）
+```go
+// 3. 实现Jobs API（需要调查数据来源）
 func (s *ServerHandler) getJobs(...)
 func (s *ServerHandler) getJob(...)
 ```
 
-### 阶段2：完善历史数据查询（短期）
+### 阶段3：完善历史数据查询（短期）
 ```go
-// 3. 单节点详情
-func (s *ServerHandler) getNode(...)
-
 // 4. 集群状态和事件
 func (s *ServerHandler) getClusterStatus(...)
 func (s *ServerHandler) getEvents(...)

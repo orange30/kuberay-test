@@ -2,6 +2,8 @@ package historyserver
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -381,8 +383,112 @@ func (s *ServerHandler) getNode(req *restful.Request, resp *restful.Response) {
 		s.redirectRequest(req, resp)
 		return
 	}
-	// Return "not yet supported" for node
-	resp.WriteErrorString(http.StatusNotImplemented, "Node not yet supported")
+
+	clusterNameID := req.Attribute(COOKIE_CLUSTER_NAME_KEY).(string)
+	clusterNamespace := req.Attribute(COOKIE_CLUSTER_NAMESPACE_KEY).(string)
+	nodeID := req.PathParameter("node_id")
+
+	if nodeID == "" {
+		resp.WriteErrorString(http.StatusBadRequest, "node_id is required")
+		return
+	}
+
+	clusterKey := clusterNameID + "_" + clusterNamespace
+
+	// Convert nodeID from Hex to Base64 format
+	// Ray Base Events use Base64 encoding, but URLs/logs use Hex encoding
+	nodeIDBase64 := nodeID
+	if hexBytes, err := hex.DecodeString(nodeID); err == nil {
+		nodeIDBase64 = base64.StdEncoding.EncodeToString(hexBytes)
+	}
+
+	// Get all actors from EventHandler and filter by nodeID
+	actorsMap := s.eventHandler.GetActorsMap(clusterKey)
+	
+	nodeActors := make(map[string]interface{})
+	var nodeIP string
+	for actorID, actor := range actorsMap {
+		if actor.Address.NodeID == nodeIDBase64 {
+			nodeActors[actorID] = formatActorForResponse(actor)
+			// Try to extract IP from the first actor on this node
+			if nodeIP == "" && actor.Address.IPAddress != "" {
+				nodeIP = actor.Address.IPAddress
+			}
+		}
+	}
+
+	// Get tasks running on this node
+	allTasks := s.eventHandler.GetTasks(clusterKey)
+	
+	nodeTasks := []eventtypes.Task{}
+	for _, task := range allTasks {
+		if task.NodeID == nodeIDBase64 {
+			nodeTasks = append(nodeTasks, task)
+		}
+	}
+
+	// Use IP from actors if available, otherwise mark as UNKNOWN
+	if nodeIP == "" {
+		nodeIP = "UNKNOWN"
+	}
+
+	// Construct basic node detail response with limited historical data
+	// Must match TypeScript NodeDetail interface expectations:
+	// - loadAvg: [[system1m,5m,15m], [perCpu1m,5m,15m]]
+	// - networkSpeed: [sendBps, receiveBps]
+	// - mem: [totalBytes, freeBytes, usedPercent]
+	// - cpus: [logicalCount, physicalCount]
+	nodeDetail := map[string]interface{}{
+		"now":       0,
+		"hostname":  "UNKNOWN", // Historical data doesn't have hostname
+		"ip":        nodeIP,
+		"cpu":       0,
+		"bootTime":  0,
+		"loadAvg": [][]float64{
+			{0, 0, 0}, // System load averages (1min, 5min, 15min)
+			{0, 0, 0}, // Per-CPU load averages
+		},
+		"networkSpeed": []float64{0, 0},                                   // [sendBps, receiveBps]
+		"mem":          []float64{0, 0, 0},                                // [total, free, percent]
+		"cpus":         []int{0, 0},                                       // [logical, physical]
+		"disk":         map[string]interface{}{},                          // Disk usage by mount point
+		"cmdline":      []string{},                                        // Command line
+		"state":        "DEAD",                                            // Node state
+		"logCounts":    0,                                                 // Log count
+		"errorCounts":  0,                                                 // Error count
+		"raylet": map[string]interface{}{
+			"nodeId":                     nodeID,
+			"state":                      "DEAD",
+			"isHeadNode":                 false,
+			"numWorkers":                 len(nodeTasks), // Use task count as approximation
+			"pid":                        0,
+			"startTime":                  0,
+			"terminateTime":              -1,
+			"objectStoreAvailableMemory": 0,
+			"objectStoreUsedMemory":      0,
+			"nodeManagerPort":            0,
+			"brpcPort":                   0,
+			"labels":                     map[string]string{},
+		},
+		"workers": []interface{}{},
+		"actors":  nodeActors,
+	}
+
+	response := map[string]interface{}{
+		"result": true,
+		"msg":    "Node detail fetched from historical data (limited)",
+		"data": map[string]interface{}{
+			"detail": nodeDetail,
+		},
+	}
+
+	respData, err := json.Marshal(response)
+	if err != nil {
+		logrus.Errorf("Failed to marshal node detail response: %v", err)
+		resp.WriteErrorString(http.StatusInternalServerError, err.Error())
+		return
+	}
+	resp.Write(respData)
 }
 
 func (s *ServerHandler) getJob(req *restful.Request, resp *restful.Response) {

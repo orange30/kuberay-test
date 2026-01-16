@@ -32,12 +32,21 @@ COPY pkg/storage/ pkg/storage/
 COPY pkg/utils/ pkg/utils/
 COPY pkg/eventserver/ pkg/eventserver/
 
-# Copy dashboard source for building
+# Step 1: Copy only package files first (for better caching)
+# These files rarely change, so this layer will be cached most of the time
+COPY dashboard/v2.51.0/client/package.json dashboard/v2.51.0/client/package-lock.json dashboard/v2.51.0/client/
+
+# Step 2: Install dependencies (this layer will be cached if package.json hasn't changed)
+RUN if [ "$BUILD_RAYSERVER_DASHBOARD" = "yes" ] ; then \
+    /bin/bash -c "source $HOME/.nvm/nvm.sh && cd dashboard/v2.51.0/client && npm ci" ; \
+fi
+
+# Step 3: Copy the rest of dashboard source
 COPY dashboard/ dashboard/
 
-# Build dashboard frontend
+# Step 4: Build dashboard frontend (only this step runs if source code changes)
 RUN if [ "$BUILD_RAYSERVER_DASHBOARD" = "yes" ] ; then \
-    /bin/bash -c "source $HOME/.nvm/nvm.sh && cd dashboard/v2.51.0/client && npm ci && npm run build" ; \
+    /bin/bash -c "source $HOME/.nvm/nvm.sh && cd dashboard/v2.51.0/client && npm run build" ; \
 else \
     mkdir -p dashboard/v2.51.0/client/build && \
     echo "Skipping dashboard build" ; \
