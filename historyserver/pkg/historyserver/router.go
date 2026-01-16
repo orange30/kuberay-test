@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path"
 	"strings"
 
 	"github.com/emicklei/go-restful/v3"
@@ -127,63 +129,87 @@ func routerAPI(s *ServerHandler) {
 		Writes("")) // Placeholder for specific return type
 }
 
-// func routerRoot(s *ServerHandler) {
-// 	ws := new(restful.WebService)
-// 	defer restful.Add(ws)
-// 	ws.Filter(RequestLogFilter)
-// 	ws.Route(ws.GET("/").To(func(req *restful.Request, w *restful.Response) {
-// 		isHomePage := true
-// 		_, err := req.Request.Cookie(COOKIE_CLUSTER_NAME_KEY)
-// 		isHomePage = err != nil
-// 		prefix := ""
-// 		if isHomePage {
-// 			prefix = "homepage"
-// 		} else {
-// 			version := "v2.51.0"
-// 			if versionCookie, err := req.Request.Cookie(COOKIE_DASHBOARD_VERSION_KEY); err == nil {
-// 				version = versionCookie.Value
-// 			}
-// 			prefix = version + "/client/build"
-// 		}
-// 		// Check if homepage file exists; if so use it, otherwise use default index.html
-// 		homepagePath := path.Join(s.dashboardDir, prefix, "index.html")
+func routerRoot(s *ServerHandler) {
+	ws := new(restful.WebService)
+	defer restful.Add(ws)
+	ws.Filter(RequestLogFilter)
+	ws.Route(ws.GET("/").To(func(req *restful.Request, w *restful.Response) {
+		isHomePage := true
+		_, err := req.Request.Cookie(COOKIE_CLUSTER_NAME_KEY)
+		isHomePage = err != nil
+		prefix := ""
+		if isHomePage {
+			prefix = "homepage"
+		} else {
+			version := "v2.51.0"
+			if versionCookie, err := req.Request.Cookie(COOKIE_DASHBOARD_VERSION_KEY); err == nil {
+				version = versionCookie.Value
+			}
+			prefix = version + "/client/build"
+		}
+		// Check if homepage file exists; if so use it, otherwise use default index.html
+		homepagePath := path.Join(s.dashboardDir, prefix, "index.html")
 
-// 		var data []byte
+		var data []byte
 
-// 		if _, statErr := os.Stat(homepagePath); !os.IsNotExist(statErr) {
-// 			data, err = os.ReadFile(homepagePath)
-// 		} else {
-// 			http.Error(w, "could not read HTML file", http.StatusInternalServerError)
-// 			logrus.Errorf("could not read HTML file: %v", statErr)
-// 			return
-// 		}
+		if _, statErr := os.Stat(homepagePath); !os.IsNotExist(statErr) {
+			data, err = os.ReadFile(homepagePath)
+		} else {
+			http.Error(w, "could not read HTML file", http.StatusInternalServerError)
+			logrus.Errorf("could not read HTML file: %v", statErr)
+			return
+		}
 
-// 		if err != nil {
-// 			http.Error(w, "could not read HTML file", http.StatusInternalServerError)
-// 			logrus.Errorf("could not read HTML file: %v", err)
-// 			return
-// 		}
-// 		w.Header().Set("Content-Type", "text/html")
-// 		w.Write(data)
-// 	}).Writes(""))
-// }
+		if err != nil {
+			http.Error(w, "could not read HTML file", http.StatusInternalServerError)
+			logrus.Errorf("could not read HTML file: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		w.Write(data)
+	}).Writes(""))
+}
 
 // TODO: this is the frontend's entry.
-// func routerHomepage(s *ServerHandler) {
-// 	ws := new(restful.WebService)
-// 	defer restful.Add(ws)
-// 	ws.Path("/homepage").Consumes("*/*").Produces("*/*").Filter(RequestLogFilter)
-// 	ws.Route(ws.GET("/").To(func(_ *restful.Request, w *restful.Response) {
-// 		data, err := os.ReadFile(path.Join(s.dashboardDir, "homepage/index.html"))
-// 		if err != nil {
-// 			// Fallback to root path
-// 			routerRoot(s)
-// 			return
-// 		}
-// 		w.Header().Set("Content-Type", "text/html")
-// 		w.Write(data)
-// 	}).Writes(""))
-// }
+func routerHomepage(s *ServerHandler) {
+	ws := new(restful.WebService)
+	defer restful.Add(ws)
+	ws.Path("/homepage").Consumes("*/*").Produces("*/*").Filter(RequestLogFilter)
+	ws.Route(ws.GET("/").To(func(_ *restful.Request, w *restful.Response) {
+		data, err := os.ReadFile(path.Join(s.dashboardDir, "homepage/index.html"))
+		if err != nil {
+			// Fallback to root path
+			routerRoot(s)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		w.Write(data)
+	}).Writes(""))
+}
+
+func routerStatic(s *ServerHandler) {
+	ws := new(restful.WebService)
+	defer restful.Add(ws)
+	ws.Path("/static").Consumes("*/*").Produces("*/*").Filter(RequestLogFilter)
+	ws.Route(ws.GET("/{path:*}").To(s.staticFileHandler).
+		Doc("Get static file or directory").
+		Param(ws.PathParameter("path", "path of the static file").DataType("string")))
+}
+
+func routerLogout(s *ServerHandler) {
+	ws := new(restful.WebService)
+	defer restful.Add(ws)
+	ws.Path("/logout").Consumes("*/*").Produces("*/*").Filter(RequestLogFilter)
+	ws.Route(ws.GET("/").To(func(req *restful.Request, w *restful.Response) {
+		// Clear all cluster-related cookies
+		http.SetCookie(w, &http.Cookie{MaxAge: -1, Path: "/", Name: COOKIE_CLUSTER_NAME_KEY})
+		http.SetCookie(w, &http.Cookie{MaxAge: -1, Path: "/", Name: COOKIE_CLUSTER_NAMESPACE_KEY})
+		http.SetCookie(w, &http.Cookie{MaxAge: -1, Path: "/", Name: COOKIE_SESSION_NAME_KEY})
+		http.SetCookie(w, &http.Cookie{MaxAge: -1, Path: "/", Name: COOKIE_DASHBOARD_VERSION_KEY})
+		// Redirect to homepage
+		http.Redirect(w, req.Request, "/", http.StatusFound)
+	}).Doc("Logout and clear session cookies").Writes(""))
+}
 
 func routerHealthz(s *ServerHandler) {
 
@@ -256,8 +282,10 @@ func (s *ServerHandler) RegisterRouter() {
 	routerNodes(s)
 	routerEvents(s)
 	routerAPI(s)
-	// routerRoot(s)
-	// routerHomepage(s)
+	routerRoot(s)
+	routerHomepage(s)
+	routerStatic(s)
+	routerLogout(s)
 	routerHealthz(s)
 	routerLogical(s)
 }

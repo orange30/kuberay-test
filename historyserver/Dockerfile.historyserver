@@ -1,6 +1,18 @@
 FROM golang:1.25.1 AS builder
 
 ENV GOPROXY=https://proxy.golang.org,direct
+ARG BUILD_RAYSERVER_DASHBOARD=yes
+
+# Install Node.js for building dashboard frontend
+RUN if [ "$BUILD_RAYSERVER_DASHBOARD" = "yes" ] ; then \
+    curl -o install.sh https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh && \
+    chmod +x install.sh && \
+    ./install.sh && \
+    /bin/bash -c "source $HOME/.nvm/nvm.sh && nvm install 14 && nvm use 14" ; \
+else \
+    echo "BUILD_RAYSERVER_DASHBOARD not yes, skipping Node.js installation" ; \
+fi
+
 WORKDIR /historyserver
 
 # Copy the go modules and manifests.
@@ -20,6 +32,17 @@ COPY pkg/storage/ pkg/storage/
 COPY pkg/utils/ pkg/utils/
 COPY pkg/eventserver/ pkg/eventserver/
 
+# Copy dashboard source for building
+COPY dashboard/ dashboard/
+
+# Build dashboard frontend
+RUN if [ "$BUILD_RAYSERVER_DASHBOARD" = "yes" ] ; then \
+    /bin/bash -c "source $HOME/.nvm/nvm.sh && cd dashboard/v2.51.0/client && npm ci && npm run build" ; \
+else \
+    mkdir -p dashboard/v2.51.0/client/build && \
+    echo "Skipping dashboard build" ; \
+fi
+
 # Build the historyserver binary.
 COPY Makefile Makefile
 RUN make buildhistoryserver GOOS=linux GOARCH=amd64
@@ -27,3 +50,6 @@ RUN make buildhistoryserver GOOS=linux GOARCH=amd64
 FROM ubuntu:22.04
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/cache/apt/ && apt-get install -y ca-certificates
 COPY --from=builder /historyserver/output/bin/historyserver /usr/local/bin/historyserver
+# Copy dashboard assets to runtime image
+COPY --from=builder /historyserver/dashboard/v2.51.0/client/build /dashboard/v2.51.0/client/build
+COPY --from=builder /historyserver/dashboard/homepage /dashboard/homepage

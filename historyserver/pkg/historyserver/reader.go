@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/emicklei/go-restful/v3"
 	"github.com/ray-project/kuberay/historyserver/pkg/utils"
@@ -83,4 +86,107 @@ func (s *ServerHandler) GetNodes(rayClusterNameID, sessionId string) ([]byte, er
 // TODO: implement this
 func (h *ServerHandler) getGrafanaHealth(req *restful.Request, resp *restful.Response) {
 	resp.WriteErrorString(http.StatusNotImplemented, "Grafana health not yet supported")
+}
+
+// staticFileHandler serves static files with security hardening
+func (s *ServerHandler) staticFileHandler(req *restful.Request, resp *restful.Response) {
+	// Get the path parameter
+	pathParam := req.PathParameter("path")
+	logrus.Infof("Static file request: path=%s", pathParam)
+
+	// Security: Clean the path to prevent directory traversal
+	pathParam = filepath.Clean("/" + pathParam)
+	pathParam = strings.TrimPrefix(pathParam, "/")
+
+	// Determine prefix based on cookie
+	isHomePage := true
+	_, err := req.Request.Cookie(COOKIE_CLUSTER_NAME_KEY)
+	isHomePage = err != nil
+
+	var prefix string
+	if isHomePage {
+		prefix = "homepage"
+	} else {
+		// Security: Whitelist dashboard versions to prevent arbitrary path access
+		version := "v2.51.0" // default version
+		if versionCookie, err := req.Request.Cookie(COOKIE_DASHBOARD_VERSION_KEY); err == nil {
+			// Validate version format: must start with 'v' and contain only alphanumeric, dots, and hyphens
+			if isValidDashboardVersion(versionCookie.Value) {
+				version = versionCookie.Value
+			} else {
+				logrus.Warnf("Invalid dashboard version in cookie: %s, using default", versionCookie.Value)
+			}
+		}
+		prefix = filepath.Join(version, "client", "build")
+	}
+
+	// Construct the full path
+	fullPath := filepath.Join(s.dashboardDir, prefix, "static", pathParam)
+
+	// Security: Ensure the resolved path is still within dashboardDir
+	// This prevents path traversal attacks even after filepath.Clean
+	absDashboardDir, err := filepath.Abs(s.dashboardDir)
+	if err != nil {
+		logrus.Errorf("Failed to get absolute path of dashboardDir: %v", err)
+		resp.WriteErrorString(http.StatusInternalServerError, "Internal server error")
+		return
+	}
+
+	absFullPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		logrus.Errorf("Failed to get absolute path: %v", err)
+		resp.WriteErrorString(http.StatusInternalServerError, "Internal server error")
+		return
+	}
+
+	// Verify the file is within the dashboard directory
+	if !strings.HasPrefix(absFullPath, absDashboardDir) {
+		logrus.Warnf("Security: Path traversal attempt detected. Requested: %s, Resolved: %s", pathParam, absFullPath)
+		resp.WriteErrorString(http.StatusForbidden, "Access denied")
+		return
+	}
+
+	logrus.Infof("Serving static file: %s", absFullPath)
+
+	// Check if file exists
+	fileInfo, err := os.Stat(absFullPath)
+	if os.IsNotExist(err) {
+		logrus.Warnf("Static file not found: %s", absFullPath)
+		resp.WriteErrorString(http.StatusNotFound, "File not found")
+		return
+	}
+	if err != nil {
+		logrus.Errorf("Error checking file: %v", err)
+		resp.WriteErrorString(http.StatusInternalServerError, "Internal server error")
+		return
+	}
+
+	// Security: Don't allow directory listing
+	if fileInfo.IsDir() {
+		logrus.Warnf("Directory listing not allowed: %s", absFullPath)
+		resp.WriteErrorString(http.StatusForbidden, "Directory listing not allowed")
+		return
+	}
+
+	// Serve the file
+	http.ServeFile(resp.ResponseWriter, req.Request, absFullPath)
+}
+
+// isValidDashboardVersion validates dashboard version format
+// Allows versions like: v2.51.0, v2.50.0-rc1, etc.
+func isValidDashboardVersion(version string) bool {
+	if len(version) == 0 || len(version) > 20 {
+		return false
+	}
+	// Must start with 'v'
+	if !strings.HasPrefix(version, "v") {
+		return false
+	}
+	// Only allow alphanumeric, dots, and hyphens
+	for _, c := range version {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
