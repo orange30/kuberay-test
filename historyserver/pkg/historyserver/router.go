@@ -600,8 +600,37 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 		return
 	}
 
-	// Not yet supported
-	resp.WriteErrorString(http.StatusNotImplemented, "Node log file not yet supported")
+	clusterNameID := req.Attribute(COOKIE_CLUSTER_NAME_KEY).(string)
+	clusterNamespace := req.Attribute(COOKIE_CLUSTER_NAMESPACE_KEY).(string)
+	nodeID := req.QueryParameter("node_id")
+	filename := req.QueryParameter("filename")
+	
+	if nodeID == "" || filename == "" {
+		resp.WriteErrorString(http.StatusBadRequest, "node_id and filename are required")
+		return
+	}
+
+	// Construct the file path in object storage: <session>/<logs>/<node_id>/<filename>
+	filePath := path.Join(sessionName, "logs", nodeID, filename)
+	
+	// Get file content from object storage using the reader
+	reader := s.reader.GetContent(clusterNameID+"_"+clusterNamespace, filePath)
+	if reader == nil {
+		logrus.Errorf("Failed to get log file from storage: %s", filePath)
+		resp.WriteErrorString(http.StatusNotFound, "Log file not found")
+		return
+	}
+
+	// Set appropriate content type
+	resp.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	
+	// Copy the content from reader to response
+	_, err := io.Copy(resp, reader)
+	if err != nil {
+		logrus.Errorf("Failed to write log file content: %v", err)
+		resp.WriteErrorString(http.StatusInternalServerError, "Failed to read log file")
+		return
+	}
 }
 
 func (s *ServerHandler) getTaskSummarize(req *restful.Request, resp *restful.Response) {
