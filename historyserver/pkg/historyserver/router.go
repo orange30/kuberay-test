@@ -72,6 +72,15 @@ func routerEvents(s *ServerHandler) {
 		Writes(""))
 }
 
+func routerTimezone(s *ServerHandler) {
+	ws := new(restful.WebService)
+	defer restful.Add(ws)
+	ws.Path("/timezone").Consumes(restful.MIME_JSON).Produces(restful.MIME_JSON).Filter(RequestLogFilter)
+	ws.Route(ws.GET("/").To(s.getTimezone).
+		Doc("get timezone").
+		Writes(""))
+}
+
 func routerAPI(s *ServerHandler) {
 	ws := new(restful.WebService)
 	defer restful.Add(ws)
@@ -290,6 +299,7 @@ func (s *ServerHandler) RegisterRouter() {
 	routerClusters(s)
 	routerNodes(s)
 	routerEvents(s)
+	routerTimezone(s)
 	routerAPI(s)
 	routerRoot(s)
 	routerHomepage(s)
@@ -412,6 +422,92 @@ func (s *ServerHandler) getEvents(req *restful.Request, resp *restful.Response) 
 			},
 		},
 	})
+}
+
+func (s *ServerHandler) getTimezone(req *restful.Request, resp *restful.Response) {
+	// Ray Dashboard calls GET /timezone very early during app startup.
+	// In historyserver mode, we can serve a local best-effort response.
+	// In live mode (cookies present), proxy to the live dashboard.
+	if sessionCookie, err := req.Request.Cookie(COOKIE_SESSION_NAME_KEY); err == nil && sessionCookie.Value == "live" {
+		clusterNameCookie, err1 := req.Request.Cookie(COOKIE_CLUSTER_NAME_KEY)
+		clusterNamespaceCookie, err2 := req.Request.Cookie(COOKIE_CLUSTER_NAMESPACE_KEY)
+		if err1 == nil && err2 == nil {
+			svcName, err := getClusterSvcName(s.clientManager.clients, clusterNameCookie.Value, clusterNamespaceCookie.Value)
+			if err == nil {
+				req.SetAttribute(ATTRIBUTE_SERVICE_NAME, svcName)
+				s.redirectRequest(req, resp)
+				return
+			}
+		}
+	}
+
+	resp.WriteAsJson(currentTimezoneInfo())
+}
+
+func currentTimezoneInfo() map[string]string {
+	// Match Ray dashboard response shape: {"offset": "+08:00", "value": "Asia/Shanghai"}
+	_, off := time.Now().Zone() // seconds east of UTC
+	sign := "+"
+	if off < 0 {
+		sign = "-"
+		off = -off
+	}
+	hours := off / 3600
+	minutes := (off % 3600) / 60
+	offset := fmt.Sprintf("%s%02d:%02d", sign, hours, minutes)
+
+	// Best-effort mapping from offset to a representative IANA timezone.
+	// This mirrors Ray's behavior of returning a canonical timezone per offset.
+	offsetToValue := map[string]string{
+		"-12:00": "Etc/GMT+12",
+		"-11:00": "Pacific/Pago_Pago",
+		"-10:00": "Pacific/Honolulu",
+		"-09:00": "America/Anchorage",
+		"-08:00": "America/Los_Angeles",
+		"-07:00": "America/Phoenix",
+		"-06:00": "America/Guatemala",
+		"-05:00": "America/Bogota",
+		"-04:00": "America/Halifax",
+		"-03:30": "America/St_Johns",
+		"-03:00": "America/Sao_Paulo",
+		"-02:00": "America/Godthab",
+		"-01:00": "Atlantic/Azores",
+		"+00:00": "Etc/UTC",
+		"+01:00": "Europe/Amsterdam",
+		"+02:00": "Asia/Amman",
+		"+03:00": "Asia/Baghdad",
+		"+03:30": "Asia/Tehran",
+		"+04:00": "Asia/Dubai",
+		"+04:30": "Asia/Kabul",
+		"+05:00": "Asia/Karachi",
+		"+05:30": "Asia/Kolkata",
+		"+05:45": "Asia/Kathmandu",
+		"+06:00": "Asia/Almaty",
+		"+06:30": "Asia/Yangon",
+		"+07:00": "Asia/Bangkok",
+		"+08:00": "Asia/Shanghai",
+		"+09:00": "Asia/Irkutsk",
+		"+09:30": "Australia/Adelaide",
+		"+10:00": "Australia/Brisbane",
+		"+11:00": "Asia/Magadan",
+		"+12:00": "Pacific/Auckland",
+		"+13:00": "Pacific/Tongatapu",
+	}
+
+	value := offsetToValue[offset]
+	if value == "" {
+		loc := time.Now().Location().String()
+		if loc != "" && loc != "Local" {
+			value = loc
+		} else {
+			value = "Etc/UTC"
+		}
+	}
+
+	return map[string]string{
+		"offset": offset,
+		"value":  value,
+	}
 }
 
 func resolveJobEventsDir(sessionName, jobID string) string {
