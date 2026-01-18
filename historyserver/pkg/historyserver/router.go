@@ -1,6 +1,7 @@
 package historyserver
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -362,8 +364,283 @@ func (s *ServerHandler) getEvents(req *restful.Request, resp *restful.Response) 
 		s.redirectRequest(req, resp)
 		return
 	}
-	// Return "not yet supported" for historical data
-	resp.WriteErrorString(http.StatusNotImplemented, "Historical events not yet supported")
+
+	// Ray Dashboard expects this endpoint to exist even if there are no events.
+	// Prefer returning an empty list (200) over 501 to keep UI functional.
+	jobID := strings.TrimSpace(req.QueryParameter("job_id"))
+	view := strings.TrimSpace(req.QueryParameter("view"))
+	_ = view // Currently ignored; returned payload shape is the same.
+
+	clusterNameID := req.Attribute(COOKIE_CLUSTER_NAME_KEY).(string)
+	clusterNamespace := req.Attribute(COOKIE_CLUSTER_NAMESPACE_KEY).(string)
+	physicalClusterKey := clusterNameID + "_" + clusterNamespace
+
+	events := make([]dashboardEvent, 0)
+	const maxEvents = 2000
+
+	// Best-effort: parse Ray JSONL event logs under session/logs/events/.
+	// If storage doesn't have these files, we just return empty events.
+	eventsDir := path.Join(sessionName, "logs", "events")
+	files := s.reader.ListFiles(physicalClusterKey, eventsDir)
+	sort.Strings(files)
+
+	queryJobIDHexLower := strings.ToLower(jobID)
+	queryJobIDBase64 := hexToBase64(queryJobIDHexLower)
+	for _, filename := range files {
+		if len(events) >= maxEvents {
+			break
+		}
+		if filename == "" {
+			continue
+		}
+		filePath := path.Join(eventsDir, filename)
+		r := s.reader.GetContent(physicalClusterKey, filePath)
+		if r == nil {
+			continue
+		}
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			if len(events) >= maxEvents {
+				break
+			}
+			line := scanner.Bytes()
+			if len(bytesTrimSpace(line)) == 0 {
+				continue
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(line, &raw); err != nil {
+				// Not a JSONL event line; ignore.
+				continue
+			}
+			ev := dashboardEventFromRaw(raw)
+			if jobID != "" {
+				evJob := strings.ToLower(ev.JobID)
+				if evJob != queryJobIDHexLower && evJob != queryJobIDBase64 && strings.ToLower(base64ToHex(ev.JobID)) != queryJobIDHexLower {
+					continue
+				}
+			}
+			events = append(events, ev)
+		}
+		// ignore scanner.Err(); best-effort
+	}
+
+	if jobID != "" {
+		resp.WriteAsJson(map[string]any{
+			"result": true,
+			"msg":    "success",
+			"data": map[string]any{
+				"jobId":  jobID,
+				"events": events,
+			},
+		})
+		return
+	}
+
+	resp.WriteAsJson(map[string]any{
+		"result": true,
+		"msg":    "success",
+		"data": map[string]any{
+			"events": map[string]any{
+				"global": events,
+			},
+		},
+	})
+}
+
+type dashboardEvent struct {
+	EventID        string         `json:"eventId"`
+	JobID          string         `json:"jobId"`
+	NodeID         string         `json:"nodeId"`
+	SourceType     string         `json:"sourceType"`
+	SourceHostname string         `json:"sourceHostname"`
+	HostName       string         `json:"hostName"`
+	SourcePid      int            `json:"sourcePid"`
+	Pid            int            `json:"pid"`
+	Label          string         `json:"label"`
+	Message        string         `json:"message"`
+	Timestamp      int64          `json:"timestamp"`
+	TimeStamp      int64          `json:"timeStamp"`
+	JobName        string         `json:"jobName"`
+	Severity       string         `json:"severity"`
+	CustomFields   map[string]any `json:"customFields"`
+}
+
+func dashboardEventFromRaw(raw map[string]any) dashboardEvent {
+	getString := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := raw[k]; ok {
+				s, _ := v.(string)
+				if s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	getInt := func(keys ...string) int {
+		for _, k := range keys {
+			if v, ok := raw[k]; ok {
+				switch t := v.(type) {
+				case float64:
+					return int(t)
+				case int:
+					return t
+				case int64:
+					return int(t)
+				case json.Number:
+					i, err := t.Int64()
+					if err == nil {
+						return int(i)
+					}
+				case string:
+					// best-effort
+					var n json.Number = json.Number(t)
+					i, err := n.Int64()
+					if err == nil {
+						return int(i)
+					}
+				}
+			}
+		}
+		return 0
+	}
+	getInt64 := func(keys ...string) int64 {
+		for _, k := range keys {
+			if v, ok := raw[k]; ok {
+				switch t := v.(type) {
+				case float64:
+					return int64(t)
+				case int:
+					return int64(t)
+				case int64:
+					return t
+				case json.Number:
+					i, err := t.Int64()
+					if err == nil {
+						return i
+					}
+				case string:
+					var n json.Number = json.Number(t)
+					i, err := n.Int64()
+					if err == nil {
+						return i
+					}
+				}
+			}
+		}
+		return 0
+	}
+
+	knownKeys := map[string]struct{}{}
+	markKnown := func(keys ...string) {
+		for _, k := range keys {
+			knownKeys[k] = struct{}{}
+		}
+	}
+
+	eventID := getString("eventId", "event_id", "eventID")
+	markKnown("eventId", "event_id", "eventID")
+	jobID := normalizeMaybeBase64ID(getString("jobId", "job_id", "jobID"))
+	markKnown("jobId", "job_id", "jobID")
+	nodeID := normalizeMaybeBase64ID(getString("nodeId", "node_id", "nodeID"))
+	markKnown("nodeId", "node_id", "nodeID")
+	sourceType := getString("sourceType", "source_type")
+	markKnown("sourceType", "source_type")
+	sourceHostname := getString("sourceHostname", "source_hostname")
+	markKnown("sourceHostname", "source_hostname")
+	hostName := getString("hostName", "hostname", "host_name")
+	markKnown("hostName", "hostname", "host_name")
+	sourcePid := getInt("sourcePid", "source_pid")
+	markKnown("sourcePid", "source_pid")
+	pid := getInt("pid")
+	markKnown("pid")
+	label := getString("label")
+	markKnown("label")
+	message := getString("message", "msg")
+	markKnown("message", "msg")
+	timestamp := getInt64("timestamp", "timeStamp", "time_stamp")
+	markKnown("timestamp", "timeStamp", "time_stamp")
+	jobName := getString("jobName", "job_name")
+	markKnown("jobName", "job_name")
+	severity := getString("severity", "level")
+	markKnown("severity", "level")
+
+	customFields := map[string]any{}
+	if cf, ok := raw["customFields"].(map[string]any); ok {
+		customFields = cf
+		markKnown("customFields")
+	} else if cf, ok := raw["custom_fields"].(map[string]any); ok {
+		customFields = cf
+		markKnown("custom_fields")
+	} else {
+		for k, v := range raw {
+			if _, ok := knownKeys[k]; ok {
+				continue
+			}
+			customFields[k] = v
+		}
+	}
+
+	// Keep both timestamp fields for backward compatibility.
+	if timestamp == 0 {
+		// Some producers may use microseconds; leave as-is (best effort).
+	}
+
+	return dashboardEvent{
+		EventID:        eventID,
+		JobID:          jobID,
+		NodeID:         nodeID,
+		SourceType:     sourceType,
+		SourceHostname: sourceHostname,
+		HostName:       hostName,
+		SourcePid:      sourcePid,
+		Pid:            pid,
+		Label:          label,
+		Message:        message,
+		Timestamp:      timestamp,
+		TimeStamp:      timestamp,
+		JobName:        jobName,
+		Severity:       severity,
+		CustomFields:   customFields,
+	}
+}
+
+func normalizeMaybeBase64ID(id string) string {
+	if id == "" {
+		return ""
+	}
+	// Heuristic: if it looks like base64, convert to hex for dashboard consistency.
+	if strings.HasSuffix(id, "=") || strings.ContainsAny(id, "+/") {
+		hexID := base64ToHex(id)
+		if hexID != "" {
+			return hexID
+		}
+	}
+	return id
+}
+
+func bytesTrimSpace(b []byte) []byte {
+	// Small helper to avoid importing bytes for a single use.
+	start := 0
+	for start < len(b) {
+		switch b[start] {
+		case ' ', '\n', '\r', '\t':
+			start++
+			continue
+		}
+		break
+	}
+	end := len(b)
+	for end > start {
+		switch b[end-1] {
+		case ' ', '\n', '\r', '\t':
+			end--
+			continue
+		}
+		break
+	}
+	return b[start:end]
 }
 
 func (s *ServerHandler) getPrometheusHealth(req *restful.Request, resp *restful.Response) {
@@ -562,14 +839,14 @@ func formatJobForResponse(job eventtypes.Job) map[string]interface{} {
 	}
 
 	// Set metadata if available (return empty object instead of null)
-	if job.Metadata != nil && len(job.Metadata) > 0 {
+	if len(job.Metadata) > 0 {
 		result["metadata"] = job.Metadata
 	} else {
 		result["metadata"] = map[string]string{}
 	}
 
 	// Set runtime_env if available (return empty object instead of null for better display)
-	if job.RuntimeEnv != nil && len(job.RuntimeEnv) > 0 {
+	if len(job.RuntimeEnv) > 0 {
 		result["runtime_env"] = job.RuntimeEnv
 	} else {
 		result["runtime_env"] = map[string]interface{}{}

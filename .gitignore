@@ -56,6 +56,9 @@ schema/
 
 **/node_modules
 
+# Local build artifact / binary (do not commit)
+historyserver/historyserver
+
 # According to Go official documentation (https://go.dev/ref/mod):
 #
 # "It is generally inadvisable to commit go.work files into version control systems,
