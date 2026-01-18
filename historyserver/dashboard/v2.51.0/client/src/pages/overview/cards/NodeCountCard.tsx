@@ -47,7 +47,7 @@ export const NodeCountCard = ({ className, sx }: NodeCountCardProps) => {
           component="iframe"
           title="Node Count"
           sx={{ flex: 1 }}
-          src={`${grafanaHost}${path}&refresh&timezone=${currentTimeZone}${timeRangeParams}&var-SessionName=${sessionName}`}
+          src={`${grafanaHost}${path}&refresh&timezone=${currentTimeZone}${timeRangeParams}&var-SessionName=${sessionName}&var-Cluster=$__all`}
           frameBorder="0"
         />
       )}

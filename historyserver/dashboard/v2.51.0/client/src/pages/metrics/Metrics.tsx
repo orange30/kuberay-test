@@ -627,7 +627,7 @@ const MetricsSection = ({
         {contents.map(({ title, pathParams }) => {
           const path =
             `/d-solo/${dashboardUid}?${pathParams}&orgId=${grafanaOrgId}` +
-            `&${refreshParams}&timezone=${currentTimeZone}${timeRangeParams}&var-SessionName=${sessionName}&var-datasource=${dashboardDatasource}`;
+            `&${refreshParams}&timezone=${currentTimeZone}${timeRangeParams}&var-SessionName=${sessionName}&var-Cluster=$__all&var-datasource=${dashboardDatasource}`;
           return (
             <Paper
               key={pathParams}

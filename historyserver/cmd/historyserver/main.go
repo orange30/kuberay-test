@@ -49,7 +49,10 @@ func main() {
 	}
 
 	globalConfig := types.RayHistoryServerConfig{
-		RootDir: rayRootDir,
+		RootDir:              rayRootDir,
+		RayGrafanaHost:       os.Getenv("RAY_GRAFANA_HOST"),
+		RayGrafanaIframeHost: os.Getenv("RAY_GRAFANA_IFRAME_HOST"),
+		RayPrometheusHost:    os.Getenv("RAY_PROMETHEUS_HOST"),
 	}
 
 	reader, err := factory(&globalConfig, jsonData)

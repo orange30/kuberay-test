@@ -53,7 +53,7 @@ export const ClusterUtilizationCard = ({
             component="iframe"
             title="Cluster Utilization"
             sx={{ flex: 1 }}
-            src={`${grafanaHost}${path}&refresh&timezone=${currentTimeZone}${timeRangeParams}&var-SessionName=${sessionName}`}
+            src={`${grafanaHost}${path}&refresh&timezone=${currentTimeZone}${timeRangeParams}&var-SessionName=${sessionName}&var-Cluster=$__all`}
             frameBorder="0"
           />
           <Box

@@ -338,9 +338,13 @@ func (s *ServerHandler) getNodes(req *restful.Request, resp *restful.Response) {
 	}
 	clusterNameID := req.Attribute(COOKIE_CLUSTER_NAME_KEY).(string)
 	clusterNamespace := req.Attribute(COOKIE_CLUSTER_NAMESPACE_KEY).(string)
-	data, err := s.GetNodes(clusterNameID+"_"+clusterNamespace, sessionName)
+
+	// For file-based operations (logs), we need the physical folder structure key (Cluster_Namespace)
+	physicalClusterKey := clusterNameID + "_" + clusterNamespace
+
+	data, err := s.GetNodes(physicalClusterKey, sessionName)
 	if data == nil {
-		logrus.Errorf("Failed to get nodes for cluster %s", clusterNameID+"_"+clusterNamespace)
+		logrus.Errorf("Failed to get nodes for cluster %s", physicalClusterKey)
 		resp.WriteError(http.StatusInternalServerError, errors.New("failed to get nodes"))
 		return
 	}
@@ -363,13 +367,25 @@ func (s *ServerHandler) getEvents(req *restful.Request, resp *restful.Response) 
 }
 
 func (s *ServerHandler) getPrometheusHealth(req *restful.Request, resp *restful.Response) {
-	sessionName := req.Attribute(COOKIE_SESSION_NAME_KEY).(string)
+	sessionName, _ := req.Attribute(COOKIE_SESSION_NAME_KEY).(string)
 	if sessionName == "live" {
 		s.redirectRequest(req, resp)
 		return
 	}
-	// Return "not yet supported" for prometheus health
-	resp.WriteErrorString(http.StatusNotImplemented, "Prometheus health not yet supported")
+
+	if s.rayPrometheusHost == "" {
+		resp.WriteAsJson(map[string]interface{}{
+			"result": false,
+			"msg":    "Prometheus host not configured",
+		})
+		return
+	}
+
+	resp.WriteAsJson(map[string]interface{}{
+		"result":          true,
+		"msg":             "success",
+		"prometheus_host": s.rayPrometheusHost,
+	})
 }
 
 func (s *ServerHandler) getJobs(req *restful.Request, resp *restful.Response) {
@@ -382,6 +398,9 @@ func (s *ServerHandler) getJobs(req *restful.Request, resp *restful.Response) {
 	clusterNameID := req.Attribute(COOKIE_CLUSTER_NAME_KEY).(string)
 	clusterNamespace := req.Attribute(COOKIE_CLUSTER_NAMESPACE_KEY).(string)
 	clusterKey := clusterNameID + "_" + clusterNamespace
+	if sessionName != "" {
+		clusterKey = clusterKey + "_" + sessionName
+	}
 
 	// Get all jobs from EventHandler
 	jobs := s.eventHandler.GetJobs(clusterKey)
@@ -391,7 +410,7 @@ func (s *ServerHandler) getJobs(req *restful.Request, resp *restful.Response) {
 	for _, job := range jobs {
 		// Enhance timing with task data
 		enrichJobTimingFromTasks(s.eventHandler, clusterKey, &job)
-		
+
 		unifiedJob := formatJobForResponse(job)
 		unifiedJobs = append(unifiedJobs, unifiedJob)
 	}
@@ -416,9 +435,20 @@ func (s *ServerHandler) getJob(req *restful.Request, resp *restful.Response) {
 	}
 
 	clusterKey := clusterNameID + "_" + clusterNamespace
+	if sessionName != "" {
+		clusterKey = clusterKey + "_" + sessionName
+	}
 
 	// Get specific job from EventHandler
-	job, found := s.eventHandler.GetJobByID(clusterKey, jobID)
+	// Convert potential hex ID (frontend) to base64 (internal)
+	internalID := hexToBase64(jobID)
+	job, found := s.eventHandler.GetJobByID(clusterKey, internalID)
+
+	// If not found with converted ID, try original ID as fallback
+	if !found && internalID != jobID {
+		job, found = s.eventHandler.GetJobByID(clusterKey, jobID)
+	}
+
 	if !found {
 		resp.WriteErrorString(http.StatusNotFound, "Job not found")
 		return
@@ -470,10 +500,10 @@ func enrichJobTimingFromTasks(eventHandler *eventserver.EventHandler, clusterKey
 	if job.EndTime.IsZero() && !latestEnd.IsZero() {
 		job.EndTime = latestEnd
 	}
-	
+
 	// If job has same start and end time but tasks show real duration, use task timing
-	if !job.StartTime.IsZero() && !job.EndTime.IsZero() && 
-		job.StartTime.Equal(job.EndTime) && 
+	if !job.StartTime.IsZero() && !job.EndTime.IsZero() &&
+		job.StartTime.Equal(job.EndTime) &&
 		!earliestStart.IsZero() && !latestEnd.IsZero() {
 		job.StartTime = earliestStart
 		job.EndTime = latestEnd
@@ -483,17 +513,17 @@ func enrichJobTimingFromTasks(eventHandler *eventserver.EventHandler, clusterKey
 // formatJobForResponse converts a Job struct to the UnifiedJob format expected by Dashboard
 func formatJobForResponse(job eventtypes.Job) map[string]interface{} {
 	result := map[string]interface{}{
-		"job_id":      job.JobID,
-		"type":        job.Type,
-		"status":      normalizeJobStatus(job.Status),
-		"entrypoint":  job.Entrypoint,
-		"message":     nil,
-		"error_type":  nil,
-		"start_time":  nil,
-		"end_time":    nil,
-		"metadata":    nil,
-		"runtime_env": nil,
-		"driver_info": nil,
+		"job_id":                    base64ToHex(job.JobID),
+		"type":                      job.Type,
+		"status":                    normalizeJobStatus(job.Status),
+		"entrypoint":                job.Entrypoint,
+		"message":                   nil,
+		"error_type":                nil,
+		"start_time":                nil,
+		"end_time":                  nil,
+		"metadata":                  nil,
+		"runtime_env":               nil,
+		"driver_info":               nil,
 		"driver_agent_http_address": nil,
 		"driver_node_id":            nil,
 		"submission_id":             nil,
@@ -521,12 +551,12 @@ func formatJobForResponse(job eventtypes.Job) map[string]interface{} {
 		// Fallback: use first event timestamp if StartTime not calculated
 		result["start_time"] = job.Events[0].Timestamp.UnixMilli()
 	}
-	
+
 	if !job.EndTime.IsZero() {
 		result["end_time"] = job.EndTime.UnixMilli()
-	} else if len(job.Events) > 0 && 
-		(job.Status == eventtypes.JOB_SUCCEEDED || job.Status == eventtypes.JOB_FAILED || 
-		 job.Status == eventtypes.JOB_STOPPED || job.Status == eventtypes.JOB_FINISHED) {
+	} else if len(job.Events) > 0 &&
+		(job.Status == eventtypes.JOB_SUCCEEDED || job.Status == eventtypes.JOB_FAILED ||
+			job.Status == eventtypes.JOB_STOPPED || job.Status == eventtypes.JOB_FINISHED) {
 		// Fallback: use last event timestamp for terminal states
 		result["end_time"] = job.Events[len(job.Events)-1].Timestamp.UnixMilli()
 	}
@@ -549,9 +579,9 @@ func formatJobForResponse(job eventtypes.Job) map[string]interface{} {
 	// Must match the DriverInfo structure expected by Dashboard
 	if job.DriverInfo != nil {
 		result["driver_info"] = map[string]interface{}{
-			"id":              job.DriverInfo.ID,
+			"id":              base64ToHex(job.DriverInfo.ID),
 			"node_ip_address": job.DriverInfo.NodeIPAddress,
-			"node_id":         job.DriverInfo.NodeID,
+			"node_id":         base64ToHex(job.DriverInfo.NodeID),
 			"pid":             job.DriverInfo.PID,
 		}
 	}
@@ -563,7 +593,7 @@ func formatJobForResponse(job eventtypes.Job) map[string]interface{} {
 
 	// Set driver_node_id if available
 	if job.DriverNodeID != "" {
-		result["driver_node_id"] = job.DriverNodeID
+		result["driver_node_id"] = base64ToHex(job.DriverNodeID)
 	}
 
 	return result
@@ -586,17 +616,17 @@ func (s *ServerHandler) getNode(req *restful.Request, resp *restful.Response) {
 	}
 
 	clusterKey := clusterNameID + "_" + clusterNamespace
+	if sessionName != "" {
+		clusterKey = clusterKey + "_" + sessionName
+	}
 
 	// Convert nodeID from Hex to Base64 format
 	// Ray Base Events use Base64 encoding, but URLs/logs use Hex encoding
-	nodeIDBase64 := nodeID
-	if hexBytes, err := hex.DecodeString(nodeID); err == nil {
-		nodeIDBase64 = base64.StdEncoding.EncodeToString(hexBytes)
-	}
+	nodeIDBase64 := hexToBase64(nodeID)
 
 	// Get all actors from EventHandler and filter by nodeID
 	actorsMap := s.eventHandler.GetActorsMap(clusterKey)
-	
+
 	nodeActors := make(map[string]interface{})
 	var nodeIP string
 	for actorID, actor := range actorsMap {
@@ -611,7 +641,7 @@ func (s *ServerHandler) getNode(req *restful.Request, resp *restful.Response) {
 
 	// Get tasks running on this node
 	allTasks := s.eventHandler.GetTasks(clusterKey)
-	
+
 	nodeTasks := []eventtypes.Task{}
 	for _, task := range allTasks {
 		if task.NodeID == nodeIDBase64 {
@@ -631,23 +661,23 @@ func (s *ServerHandler) getNode(req *restful.Request, resp *restful.Response) {
 	// - mem: [totalBytes, freeBytes, usedPercent]
 	// - cpus: [logicalCount, physicalCount]
 	nodeDetail := map[string]interface{}{
-		"now":       0,
-		"hostname":  "UNKNOWN", // Historical data doesn't have hostname
-		"ip":        nodeIP,
-		"cpu":       0,
-		"bootTime":  0,
+		"now":      0,
+		"hostname": "UNKNOWN", // Historical data doesn't have hostname
+		"ip":       nodeIP,
+		"cpu":      0,
+		"bootTime": 0,
 		"loadAvg": [][]float64{
 			{0, 0, 0}, // System load averages (1min, 5min, 15min)
 			{0, 0, 0}, // Per-CPU load averages
 		},
-		"networkSpeed": []float64{0, 0},                                   // [sendBps, receiveBps]
-		"mem":          []float64{0, 0, 0},                                // [total, free, percent]
-		"cpus":         []int{0, 0},                                       // [logical, physical]
-		"disk":         map[string]interface{}{},                          // Disk usage by mount point
-		"cmdline":      []string{},                                        // Command line
-		"state":        "DEAD",                                            // Node state
-		"logCounts":    0,                                                 // Log count
-		"errorCounts":  0,                                                 // Error count
+		"networkSpeed": []float64{0, 0},          // [sendBps, receiveBps]
+		"mem":          []float64{0, 0, 0},       // [total, free, percent]
+		"cpus":         []int{0, 0},              // [logical, physical]
+		"disk":         map[string]interface{}{}, // Disk usage by mount point
+		"cmdline":      []string{},               // Command line
+		"state":        "DEAD",                   // Node state
+		"logCounts":    0,                        // Log count
+		"errorCounts":  0,                        // Error count
 		"raylet": map[string]interface{}{
 			"nodeId":                     nodeID,
 			"state":                      "DEAD",
@@ -755,8 +785,11 @@ func (s *ServerHandler) getNodeLogs(req *restful.Request, resp *restful.Response
 func (s *ServerHandler) getLogicalActors(req *restful.Request, resp *restful.Response) {
 	clusterName := req.Attribute(COOKIE_CLUSTER_NAME_KEY).(string)
 	clusterNamespace := req.Attribute(COOKIE_CLUSTER_NAMESPACE_KEY).(string)
-	clusterNameID := clusterName + "_" + clusterNamespace
 	sessionName := req.Attribute(COOKIE_SESSION_NAME_KEY).(string)
+	clusterNameID := clusterName + "_" + clusterNamespace
+	if sessionName != "" {
+		clusterNameID = clusterNameID + "_" + sessionName
+	}
 
 	if sessionName == "live" {
 		s.redirectRequest(req, resp)
@@ -766,6 +799,12 @@ func (s *ServerHandler) getLogicalActors(req *restful.Request, resp *restful.Res
 	filterKey := req.QueryParameter("filter_keys")
 	filterValue := req.QueryParameter("filter_values")
 	filterPredicate := req.QueryParameter("filter_predicates")
+
+	// If filtering by ID fields, convert hex ID to Base64 to match internal storage
+	if filterValue != "" && (filterKey == "actor_id" || filterKey == "job_id" ||
+		filterKey == "node_id" || filterKey == "worker_id" || filterKey == "placement_group_id") {
+		filterValue = hexToBase64(filterValue)
+	}
 
 	// Get actors from EventHandler's in-memory map
 	actorsMap := s.eventHandler.GetActorsMap(clusterNameID)
@@ -785,7 +824,7 @@ func (s *ServerHandler) getLogicalActors(req *restful.Request, resp *restful.Res
 	// Format response to match Ray Dashboard API format
 	formattedActors := make(map[string]interface{})
 	for _, actor := range actors {
-		formattedActors[actor.ActorID] = formatActorForResponse(actor)
+		formattedActors[base64ToHex(actor.ActorID)] = formatActorForResponse(actor)
 	}
 
 	response := map[string]interface{}{
@@ -811,11 +850,13 @@ func formatActorForResponse(actor eventtypes.Actor) map[string]interface{} {
 	actorIDHex := base64ToHex(actor.ActorID)
 	nodeIDHex := base64ToHex(actor.Address.NodeID)
 	workerIDHex := base64ToHex(actor.Address.WorkerID)
-	
+	jobIDHex := base64ToHex(actor.JobID)
+	pgIDHex := base64ToHex(actor.PlacementGroupID)
+
 	result := map[string]interface{}{
 		"actor_id":           actorIDHex,
-		"job_id":             actor.JobID,
-		"placement_group_id": actor.PlacementGroupID,
+		"job_id":             jobIDHex,
+		"placement_group_id": pgIDHex,
 		"state":              string(actor.State),
 		"pid":                actor.PID,
 		"address": map[string]interface{}{
@@ -898,18 +939,18 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 	taskID := req.QueryParameter("task_id")
 	filename := req.QueryParameter("filename")
 	suffix := req.QueryParameter("suffix") // "out" or "err"
-	
+
 	// Support both node_id and task_id based log retrieval
 	var filePath string
-	
+
 	if taskID != "" {
 		// Task log: need to convert hex task_id to Base64 and find associated log file
 		taskIDBase64 := hexToBase64(taskID)
-		
+
 		// Get task to find its node
 		clusterKey := clusterNameID + "_" + clusterNamespace
 		tasks := s.eventHandler.GetTasks(clusterKey)
-		
+
 		var foundTask *eventtypes.Task
 		for _, task := range tasks {
 			if task.TaskID == taskIDBase64 {
@@ -917,43 +958,43 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 				break
 			}
 		}
-		
+
 		if foundTask == nil {
 			resp.WriteErrorString(http.StatusNotFound, "Task not found")
 			return
 		}
-		
+
 		// Build log path based on actual MinIO structure
 		// Path: logs/<node_id_hex>/worker-<worker_id_hex>-<job_id_hex>-*.out
 		// Note: Ray uses full hex node IDs (without dashes), worker IDs, and job IDs in filenames
-		
+
 		if suffix == "" {
 			suffix = "out" // default to stdout
 		}
-		
+
 		// Convert IDs to hex format (all stored as Base64 in events)
 		nodeIDHex := base64ToHex(foundTask.NodeID)
 		workerIDHex := base64ToHex(foundTask.WorkerID)
 		jobIDHex := base64ToHex(foundTask.JobID)
-		
+
 		if nodeIDHex == "" {
 			logrus.Warnf("Task %s has no NodeID, cannot locate logs", taskID)
 			resp.WriteErrorString(http.StatusNotFound, "Task has no associated node, cannot locate logs")
 			return
 		}
-		
+
 		// Build the log directory path
 		logDir := path.Join(sessionName, "logs", nodeIDHex)
-		
+
 		// List all files in the node's log directory to find matching worker log
 		// We need to search because the filename includes additional suffix after job_id
 		allFiles := s.reader.ListFiles(clusterNameID+"_"+clusterNamespace, logDir)
-		
+
 		// Search for files matching: worker-<worker_id>-<job_id>-*.<suffix>
 		var matchedFile string
 		searchPrefix := fmt.Sprintf("worker-%s-%s-", workerIDHex, jobIDHex)
 		searchSuffix := "." + suffix
-		
+
 		for _, filename := range allFiles {
 			if strings.HasPrefix(filename, searchPrefix) && strings.HasSuffix(filename, searchSuffix) {
 				matchedFile = filename
@@ -961,11 +1002,11 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 				break
 			}
 		}
-		
+
 		if matchedFile == "" {
 			logrus.Warnf("No worker log file found in %s with pattern %s*%s", logDir, searchPrefix, searchSuffix)
 			logrus.Infof("Available files in directory: %v", allFiles)
-			
+
 			errorMsg := fmt.Sprintf(
 				"Task log file not found.\n\n"+
 					"Searched in: %s\n"+
@@ -980,16 +1021,16 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 			resp.WriteErrorString(http.StatusNotFound, errorMsg)
 			return
 		}
-		
+
 		// Get the log file content
 		filePath = path.Join(logDir, matchedFile)
 		reader := s.reader.GetContent(clusterNameID+"_"+clusterNamespace, filePath)
 		if reader != nil {
 			logrus.Infof("Successfully retrieved task log from: %s", filePath)
-			
+
 			// Set appropriate content type
 			resp.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			
+
 			// Copy the content from reader to response
 			_, err := io.Copy(resp, reader)
 			if err != nil {
@@ -998,15 +1039,15 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 			}
 			return
 		}
-		
+
 		// If we still can't get the file (shouldn't happen)
 		resp.WriteErrorString(http.StatusInternalServerError, "Failed to retrieve log file content")
 		return
-		
+
 	} else if nodeID != "" && filename != "" {
 		// Node log: original behavior
 		filePath = path.Join(sessionName, "logs", nodeID, filename)
-		
+
 		// Get file content from object storage using the reader
 		reader := s.reader.GetContent(clusterNameID+"_"+clusterNamespace, filePath)
 		if reader == nil {
@@ -1017,7 +1058,7 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 
 		// Set appropriate content type
 		resp.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		
+
 		// Copy the content from reader to response
 		_, err := io.Copy(resp, reader)
 		if err != nil {
@@ -1034,8 +1075,11 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 func (s *ServerHandler) getTaskSummarize(req *restful.Request, resp *restful.Response) {
 	clusterName := req.Attribute(COOKIE_CLUSTER_NAME_KEY).(string)
 	clusterNamespace := req.Attribute(COOKIE_CLUSTER_NAMESPACE_KEY).(string)
-	clusterNameID := clusterName + "_" + clusterNamespace
 	sessionName := req.Attribute(COOKIE_SESSION_NAME_KEY).(string)
+	clusterNameID := clusterName + "_" + clusterNamespace
+	if sessionName != "" {
+		clusterNameID = clusterNameID + "_" + sessionName
+	}
 
 	if sessionName == "live" {
 		s.redirectRequest(req, resp)
@@ -1146,6 +1190,9 @@ func (s *ServerHandler) getTaskDetail(req *restful.Request, resp *restful.Respon
 
 	// Combine into internal key format
 	clusterNameID := clusterName + "_" + clusterNamespace
+	if sessionName != "" {
+		clusterNameID = clusterNameID + "_" + sessionName
+	}
 
 	if sessionName == "live" {
 		s.redirectRequest(req, resp)
@@ -1172,8 +1219,10 @@ func (s *ServerHandler) getTaskDetail(req *restful.Request, resp *restful.Respon
 	// detail=1 means return detailed information
 	detailed := detailStr == "1" || detailStr == "true"
 
-	// If filtering by task_id, convert hex ID to Base64 for comparison
-	if filterKey == "task_id" && filterValue != "" {
+	// If filtering by ID fields, convert hex ID to Base64 to match internal storage
+	if filterValue != "" && (filterKey == "task_id" || filterKey == "job_id" ||
+		filterKey == "node_id" || filterKey == "actor_id" ||
+		filterKey == "worker_id" || filterKey == "placement_group_id") {
 		filterValue = hexToBase64(filterValue)
 	}
 
@@ -1227,16 +1276,18 @@ func formatTaskForResponse(task eventtypes.Task) map[string]interface{} {
 	nodeIDHex := base64ToHex(task.NodeID)
 	actorIDHex := base64ToHex(task.ActorID)
 	workerIDHex := base64ToHex(task.WorkerID)
-	
+	jobIDHex := base64ToHex(task.JobID)
+	pgIDHex := base64ToHex(task.PlacementGroupID)
+
 	result := map[string]interface{}{
 		"task_id":            taskIDHex,
 		"name":               task.Name,
 		"attempt_number":     task.AttemptNumber,
 		"state":              string(task.State),
-		"job_id":             task.JobID,
+		"job_id":             jobIDHex,
 		"node_id":            nodeIDHex,
 		"actor_id":           actorIDHex,
-		"placement_group_id": task.PlacementGroupID,
+		"placement_group_id": pgIDHex,
 		"type":               string(task.Type),
 		"func_or_class_name": task.FuncOrClassName,
 		"language":           task.Language,
@@ -1270,7 +1321,7 @@ func base64ToHex(base64ID string) string {
 	if base64ID == "" {
 		return ""
 	}
-	
+
 	// Try standard encoding first
 	decoded, err := base64.StdEncoding.DecodeString(base64ID)
 	if err != nil {
@@ -1285,7 +1336,7 @@ func base64ToHex(base64ID string) string {
 			}
 		}
 	}
-	
+
 	// Convert to hex
 	return hex.EncodeToString(decoded)
 }
@@ -1296,14 +1347,14 @@ func hexToBase64(hexID string) string {
 	if hexID == "" {
 		return ""
 	}
-	
+
 	// Decode hex
 	decoded, err := hex.DecodeString(hexID)
 	if err != nil {
 		// If decode fails, return original
 		return hexID
 	}
-	
+
 	// Convert to Base64 (standard encoding with padding)
 	return base64.StdEncoding.EncodeToString(decoded)
 }

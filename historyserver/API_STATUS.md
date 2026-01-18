@@ -1,3 +1,4 @@
+
 # History Server API 实现状态清单
 
 ## 前端路由（步骤1-3已完成） ✅
@@ -9,16 +10,12 @@
 | `GET /static/{path:*}` | ✅ 已实现 | 静态资源服务（含安全加固） |
 | `GET /logout` | ✅ 已实现 | 清除session cookies并重定向 |
 
----
-
 ## 集群管理 API
 
 | 端点 | Live Session | 历史 Session | 说明 |
 |-----|-------------|-------------|------|
 | `GET /clusters` | ✅ 正常 | ✅ 正常 | 列出所有集群（live + 历史） |
 | `GET /enter_cluster/{ns}/{name}/{session}` | ✅ 正常 | ✅ 正常 | 设置Cookie进入指定集群 |
-
----
 
 ## 节点相关 API
 
@@ -27,7 +24,8 @@
 | `GET /nodes?view=summary` | ✅ 代理到Head | ✅ 已实现 | 节点列表 |
 | `GET /nodes/{node_id}` | ✅ 代理到Head | ✅ 已实现（增强版） | Dashboard 单节点详情页 |
 | `GET /api/v0/logs?node_id=xxx` | ✅ 代理到Head | ✅ 已实现 | 列出节点日志文件 |
-| `GET /api/v0/logs/file?node_id=xxx&filename=xxx` | ✅ 代理到Head | ✅ 已实现 | 日志内容查看 |
+| `GET /api/v0/logs/file?node_id=xxx&filename=xxx` | ✅ 代理到Head | ✅ 已实现 | 节点日志内容查看 |
+| `GET /api/v0/logs/file?task_id=xxx&suffix=out` | ✅ 代理到Head | ✅ 已实现 | Task 日志内容查看 |
 
 **节点详情实现说明**:
 - 从 EventHandler 的 Actors 中提取节点 IP 地址
@@ -37,8 +35,6 @@
 - 返回节点上的所有 actors 列表
 
 **说明**：历史Session的节点详情返回简化数据，包含节点ID和该节点的actors信息，但不包含实时指标（CPU、内存等）。
-
----
 
 ## 任务（Tasks）API - 已通过 EventHandler 实现 ✅
 
@@ -50,6 +46,10 @@
 | `GET /api/v0/tasks/summarize` | ✅ 代理到Head | ✅ EventHandler | 任务统计汇总 |
 
 ---
+```go
+
+```
+---
 
 ## Actor 相关 API - 已通过 EventHandler 实现 ✅
 
@@ -58,18 +58,18 @@
 | `GET /logical/actors` | ✅ 代理到Head | ✅ EventHandler | 所有Actors列表 |
 | `GET /logical/actors/{actor_id}` | ✅ 代理到Head | ✅ EventHandler | 单个Actor详情 |
 
----
-
 ## Job 相关 API
 
-| 端点 | Live Session | 历史 Session | 缺失影响 |
-|-----|-------------|-------------|----------|
-| `GET /api/jobs` | ✅ 代理到Head | ❌ NotImplemented | **Dashboard Jobs页面无法显示** |
-| `GET /api/jobs/{job_id}` | ✅ 代理到Head | ❌ NotImplemented | **单个Job详情页失败** |
+| 端点 | Live Session | 历史 Session | 说明 |
+|-----|-------------|-------------|------|
+| `GET /api/jobs` | ✅ 代理到Head | ✅ EventHandler | Jobs 列表 |
+| `GET /api/jobs/{job_id}` | ✅ 代理到Head | ✅ EventHandler | 单个 Job 详情 |
 
-**优先级**：🔴 **高**（Jobs是核心功能）
-
----
+**实现说明**：
+- Job 数据从 EventHandler 获取，包含完整的 DriverInfo 结构
+- Job 状态自动标准化（FINISHED → SUCCEEDED）
+- Job 时间从关联的 Tasks 数据增强（如果 Job 事件缺少时间戳）
+- 支持 Duration、StartTime、EndTime 计算
 
 ## 集群状态 API
 
@@ -80,18 +80,14 @@
 
 **优先级**：🟡 **中**（影响部分页面）
 
----
-
 ## 监控相关 API
 
 | 端点 | Live Session | 历史 Session | 缺失影响 |
 |-----|-------------|-------------|----------|
-| `GET /api/grafana_health` | ✅ 代理到Head | ❌ NotImplemented | Grafana集成失败 |
-| `GET /api/prometheus_health` | ✅ 代理到Head | ❌ NotImplemented | Prometheus集成失败 |
+| `GET /api/grafana_health` | ✅ 代理到Head | ✅ 已实现 | |
+| `GET /api/prometheus_health` | ✅ 代理到Head | ✅ 已实现 | |
 
 **优先级**：🟢 **低**（外部监控集成，非核心）
-
----
 
 ## Data/Serve/Placement 相关 API
 
@@ -102,8 +98,6 @@
 | `GET /api/v0/placement_groups/` | ✅ 代理到Head | ❌ NotImplemented | Placement Groups页面失败 |
 
 **优先级**：🟡 **中**（取决于用户是否使用这些功能）
-
----
 
 ## 📊 总结统计
 
@@ -128,11 +122,10 @@
 10. `GET /api/grafana_health`
 11. `GET /api/prometheus_health`
 
----
-
 ## 🎯 建议的实现顺序
 
 ### 阶段1：核心功能恢复（✅ 已完成）
+---
 ```go
 // 1. 实现日志文件读取 ✅
 func (s *ServerHandler) getNodeLogFile(...)
@@ -142,29 +135,34 @@ func (s *ServerHandler) getNodeLogFile(...)
 func (s *ServerHandler) getNode(...)
     // 返回简化的节点信息 + actors
 ```
+---
 
 ### 阶段2：Jobs API 实现（当前优先级）
+---
 ```go
 // 3. 实现Jobs API（需要调查数据来源）
 func (s *ServerHandler) getJobs(...)
 func (s *ServerHandler) getJob(...)
 ```
+---
 
 ### 阶段3：完善历史数据查询（短期）
+---
 ```go
 // 4. 集群状态和事件
 func (s *ServerHandler) getClusterStatus(...)
 func (s *ServerHandler) getEvents(...)
 ```
+---
 
 ### 阶段3：高级功能（中期）
+---
 ```go
 // 5. Data/Serve/Placement相关
 func (s *ServerHandler) getDatasets(...)
 func (s *ServerHandler) getServeApplications(...)
 func (s *ServerHandler) getPlacementGroups(...)
 ```
-
 ---
 
 ## 🔍 旧版本实现参考
@@ -181,8 +179,6 @@ func (s *ServerHandler) getPlacementGroups(...)
 - ✅ 已有 EventHandler 替代了部分 meta 文件（tasks/actors）
 - ❌ Jobs/ClusterStatus等仍需从存储读取或通过新机制实现
 
----
-
 ## ⚠️ 当前用户体验影响
 
 ### Dashboard 可用功能
@@ -196,8 +192,6 @@ func (s *ServerHandler) getPlacementGroups(...)
 - ❌ 历史 session 无法查看日志内容
 - ❌ 历史 session 无法查看 Jobs
 - ❌ 部分页面会显示错误/空白
-
----
 
 ## 📝 下一步行动
 

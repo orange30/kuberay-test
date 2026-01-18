@@ -15,16 +15,16 @@ const (
 	JOB_SUCCEEDED JobStatus = "SUCCEEDED"
 	JOB_FAILED    JobStatus = "FAILED"
 	// Ray actually uses FINISHED instead of SUCCEEDED in some cases
-	JOB_FINISHED  JobStatus = "FINISHED"
+	JOB_FINISHED JobStatus = "FINISHED"
 )
 
 // DriverInfo contains driver information for a job
 // This matches the format expected by Ray Dashboard
 type DriverInfo struct {
-	ID             string `json:"id"`
-	NodeIPAddress  string `json:"node_ip_address"`
-	NodeID         string `json:"node_id"`
-	PID            string `json:"pid"`
+	ID            string `json:"id"`
+	NodeIPAddress string `json:"node_ip_address"`
+	NodeID        string `json:"node_id"`
+	PID           string `json:"pid"`
 }
 
 // JobStateEvent represents a single state transition event with its timestamp

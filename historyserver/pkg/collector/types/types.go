@@ -7,7 +7,10 @@ import (
 )
 
 type RayHistoryServerConfig struct {
-	RootDir string
+	RootDir              string
+	RayGrafanaHost       string
+	RayGrafanaIframeHost string
+	RayPrometheusHost    string
 }
 
 type RayCollectorConfig struct {

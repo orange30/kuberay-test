@@ -149,7 +149,14 @@ func (h *EventHandler) Run(stop chan struct{}, numOfEventProcessors int) error {
 						if curr == nil {
 							continue
 						}
-						curr["clusterName"] = clusterInfo.Name + "_" + clusterInfo.Namespace
+						// Construct unique key for internal storage
+						// Must match the key construction in router.go
+						internalParams := clusterInfo.Name + "_" + clusterInfo.Namespace
+						if clusterInfo.SessionName != "" {
+							internalParams = internalParams + "_" + clusterInfo.SessionName
+						}
+						curr["clusterName"] = internalParams
+
 						eventProcessorChannels[i%numOfEventProcessors] <- curr
 					}
 				}
@@ -534,9 +541,9 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 		if !ok {
 			return fmt.Errorf("event does not have 'driverJobDefinitionEvent'")
 		}
-		
+
 		logrus.Debugf("Processing DRIVER_JOB_DEFINITION_EVENT: %+v", jobDef)
-		
+
 		jsonJobDefinition, err := json.Marshal(jobDef)
 		if err != nil {
 			return err
@@ -547,7 +554,7 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 			logrus.Errorf("Failed to unmarshal job definition: %v, json: %s", err, string(jsonJobDefinition))
 			return err
 		}
-		
+
 		// Ray might use different field names, try to extract from raw map
 		if jobDefMap, ok := jobDef.(map[string]any); ok {
 			// Try jobId vs job_id
@@ -571,8 +578,8 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 				}
 			}
 		}
-		
-		logrus.Infof("Parsed Job Definition - JobID: %s, Type: %s, Entrypoint: %s", 
+
+		logrus.Infof("Parsed Job Definition - JobID: %s, Type: %s, Entrypoint: %s",
 			currJob.JobID, currJob.Type, currJob.Entrypoint)
 
 		jobMap := h.ClusterJobMap.GetOrCreateJobMap(currentClusterName)
@@ -610,9 +617,9 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 		if jobId == "" {
 			jobId, _ = lifecycleEvent["job_id"].(string)
 		}
-		
+
 		transitions, _ := lifecycleEvent["stateTransitions"].([]any)
-		
+
 		logrus.Debugf("Processing DRIVER_JOB_LIFECYCLE_EVENT - JobID: %s, Transitions: %d", jobId, len(transitions))
 
 		if len(transitions) == 0 || jobId == "" {
@@ -715,12 +722,12 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 
 			// Calculate EndTime (SUCCEEDED, FAILED, STOPPED, or FINISHED state)
 			lastEvent := j.Events[len(j.Events)-1]
-			if lastEvent.State == types.JOB_SUCCEEDED || lastEvent.State == types.JOB_FAILED || 
+			if lastEvent.State == types.JOB_SUCCEEDED || lastEvent.State == types.JOB_FAILED ||
 				lastEvent.State == types.JOB_STOPPED || lastEvent.State == types.JOB_FINISHED {
 				j.EndTime = lastEvent.Timestamp
 			}
-			
-			logrus.Debugf("Job %s: Events=%d, StartTime=%v, EndTime=%v, Status=%s", 
+
+			logrus.Debugf("Job %s: Events=%d, StartTime=%v, EndTime=%v, Status=%s",
 				jobId, len(j.Events), j.StartTime, j.EndTime, j.Status)
 		})
 
@@ -948,4 +955,3 @@ func (h *EventHandler) GetJobByID(clusterName, jobID string) (types.Job, bool) {
 	}
 	return job.DeepCopy(), true
 }
-

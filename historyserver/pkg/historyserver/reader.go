@@ -11,8 +11,9 @@ import (
 	"strings"
 
 	"github.com/emicklei/go-restful/v3"
-	"github.com/ray-project/kuberay/historyserver/pkg/utils"
 	"github.com/sirupsen/logrus"
+
+	"github.com/ray-project/kuberay/historyserver/pkg/utils"
 )
 
 func (s *ServerHandler) listClusters(limit int) []utils.ClusterInfo {
@@ -83,9 +84,45 @@ func (s *ServerHandler) GetNodes(rayClusterNameID, sessionId string) ([]byte, er
 	return json.Marshal(templ)
 }
 
-// TODO: implement this
 func (h *ServerHandler) getGrafanaHealth(req *restful.Request, resp *restful.Response) {
-	resp.WriteErrorString(http.StatusNotImplemented, "Grafana health not yet supported")
+	grafanaHost := h.rayGrafanaIframeHost
+	if grafanaHost == "" {
+		grafanaHost = h.rayGrafanaHost
+	}
+	grafanaHost = strings.TrimRight(grafanaHost, "/")
+
+	if grafanaHost == "" {
+		resp.WriteAsJson(map[string]interface{}{
+			"result": false,
+			"msg":    "Grafana host not configured",
+		})
+		return
+	}
+
+	sessionName := req.Attribute(COOKIE_SESSION_NAME_KEY)
+	sessionNameStr, ok := sessionName.(string)
+	if sessionName == nil || !ok || sessionNameStr == "" {
+		sessionNameStr = "default"
+	}
+
+	resp.WriteAsJson(map[string]interface{}{
+		"result": true,
+		"msg":    "success",
+		"data": map[string]interface{}{
+			"grafanaHost":  grafanaHost,
+			"grafanaOrgId": "1",
+			"sessionName":  sessionNameStr,
+			"dashboardUids": map[string]string{
+				"default":         "rayDefaultDashboard",
+				"serve":           "rayServeDashboard",
+				"serveDeployment": "rayServeDeploymentDashboard",
+				"data":            "rayDataDashboard",
+			},
+			"dashboardDatasource": "Prometheus",
+		},
+		// Keep snake_case fields for backward compatibility with any existing clients.
+		"grafana_host": grafanaHost,
+	})
 }
 
 // staticFileHandler serves static files with security hardening

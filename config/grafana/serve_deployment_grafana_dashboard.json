@@ -2100,7 +2100,9 @@
             {
                 "allValue": ".*",
                 "current": {
-                    "selected": false
+                    "selected": true,
+                    "text": "All",
+                    "value": "$__all"
                 },
                 "datasource": "${datasource}",
                 "definition": "label_values(ray_node_network_receive_speed{}, ray_io_cluster)",

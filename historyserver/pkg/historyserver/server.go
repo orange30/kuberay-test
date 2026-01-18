@@ -13,9 +13,12 @@ import (
 )
 
 type ServerHandler struct {
-	maxClusters  int
-	rootDir      string
-	dashboardDir string
+	maxClusters          int
+	rootDir              string
+	dashboardDir         string
+	rayGrafanaHost       string
+	rayGrafanaIframeHost string
+	rayPrometheusHost    string
 
 	reader        storage.StorageReader
 	clientManager *ClientManager
@@ -29,8 +32,11 @@ func NewServerHandler(c *types.RayHistoryServerConfig, dashboardDir string, read
 		clientManager: clientManager,
 		eventHandler:  eventHandler,
 
-		rootDir:      c.RootDir,
-		dashboardDir: dashboardDir,
+		rootDir:              c.RootDir,
+		rayGrafanaHost:       c.RayGrafanaHost,
+		rayGrafanaIframeHost: c.RayGrafanaIframeHost,
+		rayPrometheusHost:    c.RayPrometheusHost,
+		dashboardDir:         dashboardDir,
 		// TODO: make this configurable
 		maxClusters: 100,
 		httpClient: &http.Client{
