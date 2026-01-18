@@ -378,51 +378,17 @@ func (s *ServerHandler) getEvents(req *restful.Request, resp *restful.Response) 
 	events := make([]dashboardEvent, 0)
 	const maxEvents = 2000
 
-	// Best-effort: parse Ray JSONL event logs under session/logs/events/.
-	// If storage doesn't have these files, we just return empty events.
-	eventsDir := path.Join(sessionName, "logs", "events")
-	files := s.reader.ListFiles(physicalClusterKey, eventsDir)
-	sort.Strings(files)
-
-	queryJobIDHexLower := strings.ToLower(jobID)
-	queryJobIDBase64 := hexToBase64(queryJobIDHexLower)
-	for _, filename := range files {
-		if len(events) >= maxEvents {
-			break
-		}
-		if filename == "" {
-			continue
-		}
-		filePath := path.Join(eventsDir, filename)
-		r := s.reader.GetContent(physicalClusterKey, filePath)
-		if r == nil {
-			continue
-		}
-		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			if len(events) >= maxEvents {
-				break
-			}
-			line := scanner.Bytes()
-			if len(bytesTrimSpace(line)) == 0 {
-				continue
-			}
-			var raw map[string]any
-			if err := json.Unmarshal(line, &raw); err != nil {
-				// Not a JSONL event line; ignore.
-				continue
-			}
-			ev := dashboardEventFromRaw(raw)
-			if jobID != "" {
-				evJob := strings.ToLower(ev.JobID)
-				if evJob != queryJobIDHexLower && evJob != queryJobIDBase64 && strings.ToLower(base64ToHex(ev.JobID)) != queryJobIDHexLower {
-					continue
-				}
-			}
-			events = append(events, ev)
-		}
-		// ignore scanner.Err(); best-effort
+	// Best-effort: parse Ray JSONL events from object storage.
+	// In our MinIO layout, events are typically under:
+	// - <session>/node_events/<nodeid>-YYYY-MM-DD-HH
+	// - <session>/job_events/<jobIdBase64>/<nodeid>-YYYY-MM-DD-HH
+	// If these don't exist, return empty events (still 200).
+	if jobID != "" {
+		jobDir := resolveJobEventsDir(sessionName, jobID)
+		readEventsFromDir(s.reader, physicalClusterKey, jobDir, &events, maxEvents)
+	} else {
+		nodeDir := path.Join(sessionName, "node_events")
+		readEventsFromDir(s.reader, physicalClusterKey, nodeDir, &events, maxEvents)
 	}
 
 	if jobID != "" {
@@ -446,6 +412,62 @@ func (s *ServerHandler) getEvents(req *restful.Request, resp *restful.Response) 
 			},
 		},
 	})
+}
+
+func resolveJobEventsDir(sessionName, jobID string) string {
+	// job_events directory name in storage is Base64 (with padding).
+	// Dashboard may send hex (our newer API shape) or base64 (older shape).
+	jobID = strings.TrimSpace(jobID)
+	jobDirName := jobID
+	// Try hex -> base64 conversion; if it fails, hexToBase64 returns original.
+	if converted := hexToBase64(strings.ToLower(jobID)); converted != "" {
+		jobDirName = converted
+	}
+	return path.Join(sessionName, "job_events", jobDirName)
+}
+
+type listFilesReader interface {
+	ListFiles(rayClusterNameID, dir string) []string
+	GetContent(rayClusterNameID, filePath string) io.Reader
+}
+
+func readEventsFromDir(reader listFilesReader, physicalClusterKey, dir string, out *[]dashboardEvent, maxEvents int) {
+	if dir == "" {
+		return
+	}
+	files := reader.ListFiles(physicalClusterKey, dir)
+	sort.Strings(files)
+	for _, filename := range files {
+		if len(*out) >= maxEvents {
+			return
+		}
+		if filename == "" {
+			continue
+		}
+		filePath := path.Join(dir, filename)
+		r := reader.GetContent(physicalClusterKey, filePath)
+		if r == nil {
+			continue
+		}
+		scanner := bufio.NewScanner(r)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			if len(*out) >= maxEvents {
+				return
+			}
+			line := scanner.Bytes()
+			if len(bytesTrimSpace(line)) == 0 {
+				continue
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(line, &raw); err != nil {
+				continue
+			}
+			ev := dashboardEventFromRaw(raw)
+			*out = append(*out, ev)
+		}
+		// ignore scanner.Err(); best-effort
+	}
 }
 
 type dashboardEvent struct {
