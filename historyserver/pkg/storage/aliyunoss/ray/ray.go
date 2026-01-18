@@ -82,6 +82,10 @@ func (r *RayLogsHandler) _listFiles(prefix string, delimiter string, onlyBase bo
 		logrus.Infof("[ListFiles]Returned objects in %v. length of lsRes.Objects: %v, length of lsRes.CommonPrefixes: %v", prefix+"/", len(lsRes.Objects),
 			len(lsRes.CommonPrefixes))
 		for _, objects := range lsRes.Objects {
+			// Skip directory marker objects like "some/prefix/".
+			if strings.HasSuffix(objects.Key, "/") {
+				continue
+			}
 			objName := objects.Key
 			if onlyBase {
 				objName = path.Base(objects.Key)

@@ -444,29 +444,57 @@ func readEventsFromDir(reader listFilesReader, physicalClusterKey, dir string, o
 		if filename == "" {
 			continue
 		}
+		// Skip directory-like entries.
+		if strings.HasSuffix(filename, "/") {
+			continue
+		}
 		filePath := path.Join(dir, filename)
 		r := reader.GetContent(physicalClusterKey, filePath)
 		if r == nil {
 			continue
 		}
-		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		for scanner.Scan() {
+
+		// Robust parsing: support
+		// 1) JSONL (multiple JSON objects separated by newlines)
+		// 2) Multi-line JSON objects
+		// 3) A single JSON array containing multiple objects
+		dec := json.NewDecoder(bufio.NewReader(r))
+		dec.UseNumber()
+		decoded := 0
+		for {
 			if len(*out) >= maxEvents {
 				return
 			}
-			line := scanner.Bytes()
-			if len(bytesTrimSpace(line)) == 0 {
-				continue
+			var v any
+			err := dec.Decode(&v)
+			if errors.Is(err, io.EOF) {
+				break
 			}
-			var raw map[string]any
-			if err := json.Unmarshal(line, &raw); err != nil {
-				continue
+			if err != nil {
+				// Best-effort: avoid failing the whole endpoint if a file is malformed.
+				logrus.Debugf("Failed to decode events file %s: %v", filePath, err)
+				break
 			}
-			ev := dashboardEventFromRaw(raw)
-			*out = append(*out, ev)
+			decoded++
+			switch t := v.(type) {
+			case map[string]any:
+				*out = append(*out, dashboardEventFromRaw(t))
+			case []any:
+				for _, item := range t {
+					if len(*out) >= maxEvents {
+						return
+					}
+					raw, ok := item.(map[string]any)
+					if !ok {
+						continue
+					}
+					*out = append(*out, dashboardEventFromRaw(raw))
+				}
+			default:
+				// Ignore non-object items.
+			}
 		}
-		// ignore scanner.Err(); best-effort
+		_ = decoded
 	}
 }
 
