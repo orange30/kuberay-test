@@ -1080,8 +1080,111 @@ func (s *ServerHandler) getClusterStatus(req *restful.Request, resp *restful.Res
 		return
 	}
 
-	// Return "not yet supported" for cluster status
-	resp.WriteErrorString(http.StatusNotImplemented, "Cluster status not yet supported")
+	clusterNameID := req.Attribute(COOKIE_CLUSTER_NAME_KEY).(string)
+	clusterNamespace := req.Attribute(COOKIE_CLUSTER_NAMESPACE_KEY).(string)
+
+	// For object storage paths, we use the physical folder key: <clusterNameID>_<namespace>
+	physicalClusterKey := clusterNameID + "_" + clusterNamespace
+
+	// For in-memory state, we use the logical key: <clusterNameID>_<namespace>_<sessionName>
+	clusterKey := physicalClusterKey
+	if sessionName != "" {
+		clusterKey = clusterKey + "_" + sessionName
+	}
+
+	nodeIDs := inferNodeIDsForClusterStatus(s.reader, physicalClusterKey, sessionName)
+	jobCount := 0
+	if s.eventHandler != nil {
+		jobCount = len(s.eventHandler.GetJobs(clusterKey))
+	}
+
+	// The Ray Dashboard frontend (v2.51.0) expects a string that includes both
+	// "Node status" and "Resources" so it can split and render two cards.
+	// We provide a best-effort, autoscaler-like text output.
+	now := time.Now().UTC().Format("2006-01-02 15:04:05Z")
+	clusterStatus := strings.Join([]string{
+		fmt.Sprintf("===== Autoscaler status: %s =====", now),
+		"Node status",
+		"-----",
+		"Healthy:",
+		fmt.Sprintf("  %d node(s)", len(nodeIDs)),
+		"Pending:",
+		"  0 node(s)",
+		"Recent failures:",
+		"  (none)",
+		"Jobs:",
+		fmt.Sprintf("  %d total", jobCount),
+		"",
+		"Resources",
+		"-----",
+		"Usage:",
+		"  (unavailable in history mode)",
+		"Demands:",
+		"  (none)",
+		"",
+	}, "\n")
+
+	resp.WriteAsJson(map[string]any{
+		"result":  true,
+		"message": "success",
+		"data": map[string]any{
+			"clusterStatus": clusterStatus,
+		},
+		// Keep "msg" for any older clients that used it.
+		"msg": "success",
+	})
+}
+
+func inferNodeIDsForClusterStatus(reader listFilesReader, physicalClusterKey, sessionName string) []string {
+	seen := map[string]struct{}{}
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		seen[id] = struct{}{}
+	}
+
+	// Prefer the existing logs layout: <session>/logs/<nodeId>/...
+	if sessionName != "" {
+		logDir := path.Join(sessionName, "logs")
+		nodes := reader.ListFiles(physicalClusterKey, logDir)
+		for _, n := range nodes {
+			// Storage backends may include directory suffix.
+			clean := strings.TrimSuffix(n, "/")
+			clean = path.Clean(clean)
+			if clean == "." || clean == "" {
+				continue
+			}
+			add(clean)
+		}
+	}
+
+	if len(seen) == 0 && sessionName != "" {
+		// Fallback: infer node ids from node_events file names:
+		// <session>/node_events/<nodeId>-YYYY-MM-DD-HH
+		eventsDir := path.Join(sessionName, "node_events")
+		files := reader.ListFiles(physicalClusterKey, eventsDir)
+		for _, f := range files {
+			f = strings.TrimSuffix(f, "/")
+			base := path.Base(f)
+			if base == "." || base == "" {
+				continue
+			}
+			if idx := strings.IndexByte(base, '-'); idx > 0 {
+				add(base[:idx])
+			} else {
+				add(base)
+			}
+		}
+	}
+
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (s *ServerHandler) getNodeLogs(req *restful.Request, resp *restful.Response) {
