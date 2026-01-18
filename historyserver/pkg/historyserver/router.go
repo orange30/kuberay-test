@@ -1154,8 +1154,25 @@ func (s *ServerHandler) getServeApplications(req *restful.Request, resp *restful
 		return
 	}
 
-	// Return "not yet supported" for serve applications
-	resp.WriteErrorString(http.StatusNotImplemented, "Serve applications not yet supported")
+	// Ray Dashboard expects this endpoint to exist.
+	// In history mode, we currently don't reconstruct Serve state, so return an empty payload (200)
+	// to keep the UI functional.
+	resp.WriteAsJson(map[string]any{
+		"grpc_options": map[string]any{
+			"port": 0,
+		},
+		"proxy_location": "Disabled",
+		"controller_info": map[string]any{
+			"node_id":       nil,
+			"node_ip":       nil,
+			"actor_id":      nil,
+			"actor_name":    nil,
+			"worker_id":     nil,
+			"log_file_path": nil,
+		},
+		"proxies":      nil,
+		"applications": map[string]any{},
+	})
 }
 
 func (s *ServerHandler) getPlacementGroups(req *restful.Request, resp *restful.Response) {

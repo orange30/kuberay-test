@@ -103,16 +103,16 @@ func (r *RayLogsHandler) _listFiles(prefix string, delimiter string, onlyBase bo
 				prefix+"/", len(page.Contents), len(page.CommonPrefixes))
 
 			for _, object := range page.Contents {
-					key := *object.Key
-					// Skip directory marker objects like "some/prefix/".
-					if strings.HasSuffix(key, "/") {
-						continue
-					}
-					objName := key
-					if onlyBase {
-						objName = path.Base(key)
-					}
-					files = append(files, objName)
+				key := *object.Key
+				// Skip directory marker objects like "some/prefix/".
+				if strings.HasSuffix(key, "/") {
+					continue
+				}
+				objName := key
+				if onlyBase {
+					objName = path.Base(key)
+				}
+				files = append(files, objName)
 			}
 
 			for _, object := range page.CommonPrefixes {
