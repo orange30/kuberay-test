@@ -11,9 +11,9 @@ import (
 	"github.com/ray-project/kuberay/historyserver/pkg/utils"
 )
 
-// workerLogPattern matches: worker-<workerID>-<jobID>-<pid>.<timestamp>.out
-// Example: worker-abc123-def456-1234.1234567890.out
-var workerLogPattern = regexp.MustCompile(`^worker-([0-9a-f]+)-([0-9a-f]+)-(\d+)\.(\d+)\.(out|err)$`)
+// workerLogPattern matches: python-core-worker-<workerID_hex>_<pid>.log
+// Example: python-core-worker-99fb9107e3a872fe769fb61d87e3781eb226f3241f269185b3154399_3944.log
+var workerLogPattern = regexp.MustCompile(`^python-core-worker-([0-9a-f]+)_(\d+)\.log$`)
 
 // EnrichTasksFromLogs scans log files to infer missing task metadata (nodeId, workerId)
 // This is a fallback when TASK_LIFECYCLE_EVENT has empty nodeId/workerId fields.
@@ -53,25 +53,24 @@ func (h *EventHandler) EnrichTasksFromLogs(clusterInfo utils.ClusterInfo) {
 
 			// Parse worker log filename
 			matches := workerLogPattern.FindStringSubmatch(logFile)
-			if len(matches) != 6 {
+			if len(matches) != 3 {
 				continue // Not a worker log file
 			}
 
 			workerIDHex := matches[1]
-			jobIDHex := matches[2]
-			// pid := matches[3] // Could be useful for future enhancements
+			// pid := matches[2] // Could be useful for future enhancements
 
 			// Convert hex IDs to base64 (internal storage format)
 			nodeIDBase64 := hexToBase64ForEnrich(nodeIDHex)
 			workerIDBase64 := hexToBase64ForEnrich(workerIDHex)
-			jobIDBase64 := hexToBase64ForEnrich(jobIDHex)
 
-			if nodeIDBase64 == "" || workerIDBase64 == "" || jobIDBase64 == "" {
+			if nodeIDBase64 == "" || workerIDBase64 == "" {
 				continue // Conversion failed
 			}
 
-			// Find tasks matching this jobID that are missing nodeId/workerId
-			enrichedCount += h.enrichTasksByJobID(sessionKey, jobIDBase64, nodeIDBase64, workerIDBase64)
+			// Enrich all tasks on this node+worker that are missing nodeId/workerId
+			// Note: We can't infer jobID from filename anymore, so we iterate all tasks in session
+			enrichedCount += h.enrichTasksByNodeWorker(sessionKey, nodeIDBase64, workerIDBase64)
 		}
 	}
 
@@ -80,8 +79,8 @@ func (h *EventHandler) EnrichTasksFromLogs(clusterInfo utils.ClusterInfo) {
 	}
 }
 
-// enrichTasksByJobID updates tasks matching jobID with nodeId/workerId from log files
-func (h *EventHandler) enrichTasksByJobID(clusterKey, jobID, nodeID, workerID string) int {
+// enrichTasksByNodeWorker finds tasks with missing nodeId/workerId and fills them
+func (h *EventHandler) enrichTasksByNodeWorker(clusterKey, nodeID, workerID string) int {
 	h.ClusterTaskMap.RLock()
 	taskMap, ok := h.ClusterTaskMap.ClusterTaskMap[clusterKey]
 	h.ClusterTaskMap.RUnlock()
@@ -99,24 +98,25 @@ func (h *EventHandler) enrichTasksByJobID(clusterKey, jobID, nodeID, workerID st
 		for i := range attempts {
 			task := &attempts[i]
 
-			// Only enrich if:
-			// 1. JobID matches
-			// 2. NodeID or WorkerID is missing
-			if task.JobID == jobID && (task.NodeID == "" || task.WorkerID == "") {
-				if task.NodeID == "" {
-					task.NodeID = nodeID
-				}
-				if task.WorkerID == "" {
-					task.WorkerID = workerID
-				}
+			// Only enrich if WorkerID is missing (fill both node and worker together)
+			if task.WorkerID == "" {
+				task.NodeID = nodeID
+				task.WorkerID = workerID
 				enrichedCount++
 				logrus.Debugf("[EnrichTasksFromLogs] Enriched task %s (attempt %d): nodeId=%s workerId=%s",
-					taskID, task.AttemptNumber, nodeID, workerID)
+					taskID, task.AttemptNumber, nodeID[:min(6, len(nodeID))], workerID[:min(6, len(workerID))])
 			}
 		}
 	}
 
 	return enrichedCount
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // hexToBase64ForEnrich converts hex ID to base64 (used by enricher)

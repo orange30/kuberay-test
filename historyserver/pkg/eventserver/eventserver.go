@@ -166,7 +166,7 @@ func (h *EventHandler) Run(stop chan struct{}, numOfEventProcessors int) error {
 				// After processing structured events, parse event_JOBS.log as fallback
 				logrus.Infof("[EventHandler] Parsing event_JOBS.log for cluster %s", clusterInfo.Name)
 				h.createJobsFromJobsLog(clusterInfo)
-				
+
 				// Enrich tasks from log files (补齐缺失的 nodeId/workerId)
 				logrus.Debugf("[EventHandler] Enriching tasks from log files for cluster %s", clusterInfo.Name)
 				h.EnrichTasksFromLogs(clusterInfo)

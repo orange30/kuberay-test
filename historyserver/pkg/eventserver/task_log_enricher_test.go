@@ -32,32 +32,32 @@ func TestEnrichTasksFromLogs(t *testing.T) {
 	mock := &mockStorageForEnrich{
 		files: make(map[string][]string),
 	}
-	
+
 	// Simulate log directory structure:
 	// session/logs/
-	//   -> abc123/
-	//      -> worker-def456-aabbccdd-1000.1234567.out
-	mock.files["session_test/logs/"] = []string{"abc123/"}
-	mock.files["session_test/logs/abc123/"] = []string{
-		"worker-def456-aabbccdd-1000.1234567.out",
-		"worker-def456-aabbccdd-1000.1234567.err",
+	//   -> e12103b473d520863b8098c6995121fde78ce0ef6ba47ad555c9865e/
+	//      -> python-core-worker-99fb9107e3a872fe769fb61d87e3781eb226f3241f269185b3154399_3944.log
+	nodeIDHex := "e12103b473d520863b8098c6995121fde78ce0ef6ba47ad555c9865e"
+	workerIDHex := "99fb9107e3a872fe769fb61d87e3781eb226f3241f269185b3154399"
+
+	mock.files["session_test/logs/"] = []string{nodeIDHex + "/"}
+	mock.files["session_test/logs/"+nodeIDHex+"/"] = []string{
+		"python-core-worker-" + workerIDHex + "_3944.log",
 	}
-	
+
 	// Create EventHandler with test tasks
 	h := NewEventHandler(mock)
 	clusterKey := "test-cluster_default_session_test"
-	
-	// Add a task with matching jobID but missing nodeId/workerId
-	jobIDBase64 := base64.StdEncoding.EncodeToString(hexDecode(t, "aabbccdd"))
-	
+
+	// Add a task with missing nodeId/workerId
 	taskMap := h.ClusterTaskMap.GetOrCreateTaskMap(clusterKey)
 	taskMap.CreateOrMergeAttempt("task1", 0, func(t *types.Task) {
 		t.TaskID = "task1"
-		t.JobID = jobIDBase64
-		t.NodeID = "" // Missing - should be enriched
+		t.JobID = "job123"
+		t.NodeID = ""   // Missing - should be enriched
 		t.WorkerID = "" // Missing - should be enriched
 	})
-	
+
 	// Run enrichment
 	clusterInfo := utils.ClusterInfo{
 		Name:        "test-cluster",
@@ -65,13 +65,13 @@ func TestEnrichTasksFromLogs(t *testing.T) {
 		SessionName: "session_test",
 	}
 	h.EnrichTasksFromLogs(clusterInfo)
-	
+
 	// Verify task was enriched
 	tasks := h.GetTasks(clusterKey)
 	if len(tasks) != 1 {
 		t.Fatalf("Expected 1 task, got %d", len(tasks))
 	}
-	
+
 	task := tasks[0]
 	if task.NodeID == "" {
 		t.Errorf("NodeID was not enriched")
@@ -79,8 +79,19 @@ func TestEnrichTasksFromLogs(t *testing.T) {
 	if task.WorkerID == "" {
 		t.Errorf("WorkerID was not enriched")
 	}
-	
-	t.Logf("✅ Task enriched: nodeId=%s workerId=%s", task.NodeID, task.WorkerID)
+
+	// Verify the values match expected base64-encoded IDs
+	expectedNodeID := base64.StdEncoding.EncodeToString(hexDecode(t, nodeIDHex))
+	expectedWorkerID := base64.StdEncoding.EncodeToString(hexDecode(t, workerIDHex))
+
+	if task.NodeID != expectedNodeID {
+		t.Errorf("NodeID mismatch: got %s, want %s", task.NodeID, expectedNodeID)
+	}
+	if task.WorkerID != expectedWorkerID {
+		t.Errorf("WorkerID mismatch: got %s, want %s", task.WorkerID, expectedWorkerID)
+	}
+
+	t.Logf("✅ Task enriched: nodeId=%s... workerId=%s...", task.NodeID[:6], task.WorkerID[:6])
 }
 
 func hexDecode(t *testing.T, hexStr string) []byte {
