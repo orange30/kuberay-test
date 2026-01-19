@@ -140,6 +140,10 @@ func (s *ServerHandler) getNodeLogFile(...)
 func (s *ServerHandler) getNode(...)
     // 返回简化的节点信息 + actors
 ```
+```output
+/var/folders/yc/26ppqtln1fb9zcycv0d8xw280000gn/T/main.go:7:40: syntax error: unexpected ..., expected expression
+/var/folders/yc/26ppqtln1fb9zcycv0d8xw280000gn/T/main.go:11:33: syntax error: unexpected ..., expected expression
+```
 ---
 ### 阶段2：Jobs API 实现（当前优先级）
 ---

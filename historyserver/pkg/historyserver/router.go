@@ -17,13 +17,14 @@ import (
 	"time"
 
 	"github.com/emicklei/go-restful/v3"
-	"github.com/ray-project/kuberay/historyserver/pkg/eventserver"
-	eventtypes "github.com/ray-project/kuberay/historyserver/pkg/eventserver/types"
-	"github.com/ray-project/kuberay/historyserver/pkg/utils"
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ray-project/kuberay/historyserver/pkg/eventserver"
+	eventtypes "github.com/ray-project/kuberay/historyserver/pkg/eventserver/types"
+	"github.com/ray-project/kuberay/historyserver/pkg/utils"
 )
 
 const (

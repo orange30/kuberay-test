@@ -8,9 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/ray-project/kuberay/historyserver/pkg/eventserver/types"
 	"github.com/ray-project/kuberay/historyserver/pkg/utils"
-	"github.com/sirupsen/logrus"
 )
 
 // JobsLogEvent represents an event from event_JOBS.log
