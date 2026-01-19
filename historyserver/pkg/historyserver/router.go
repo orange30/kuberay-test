@@ -1821,7 +1821,6 @@ func (s *ServerHandler) getTaskDetail(req *restful.Request, resp *restful.Respon
 	resp.Write(respData)
 }
 
-
 func strOrNil(s string) interface{} {
 	if s == "" {
 		return nil
