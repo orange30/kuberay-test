@@ -50,7 +50,6 @@
 
 ```
 ---
-
 ## Actor 相关 API - 已通过 EventHandler 实现 ✅
 
 | 端点 | Live Session | 历史 Session | 说明 |
@@ -75,8 +74,8 @@
 
 | 端点 | Live Session | 历史 Session | 缺失影响 |
 |-----|-------------|-------------|----------|
-| `GET /api/cluster_status` | ✅ 代理到Head | ❌ NotImplemented | Dashboard Overview页autoscaler状态无法显示 |
-| `GET /events` | ✅ 代理到Head | ❌ NotImplemented | 事件列表无法查看 |
+| `GET /api/cluster_status` | ✅ 代理到Head | ✅ 已实现 | |
+| `GET /events` | ✅ 代理到Head | ✅ 已实现 | |
 
 **优先级**：🟡 **中**（影响部分页面）
 
@@ -94,7 +93,7 @@
 | 端点 | Live Session | 历史 Session | 缺失影响 |
 |-----|-------------|-------------|----------|
 | `GET /api/data/datasets/{job_id}` | ✅ 代理到Head | ❌ NotImplemented | Ray Data相关页面失败 |
-| `GET /api/serve/applications/` | ✅ 代理到Head | ❌ NotImplemented | Ray Serve页面无法显示 |
+| `GET /api/serve/applications/` | ✅ 代理到Head | ✅ 已实现 (兼容空/Sub) | Ray Serve页面无法显示 |
 | `GET /api/v0/placement_groups/` | ✅ 代理到Head | ❌ NotImplemented | Placement Groups页面失败 |
 
 **优先级**：🟡 **中**（取决于用户是否使用这些功能）
@@ -102,8 +101,8 @@
 ## 📊 总结统计
 
 ### 历史 Session API 实现状态
-- ✅ **已完成**：14个（前端路由4 + 集群2 + 节点4 + tasks 2 + actors 2）
-- ❌ **缺失**：8个（jobs 2 + 集群状态2 + 监控2 + data/serve/placement 3）
+- ✅ **已完成**：18个（前端路由4 + 集群2 + 节点4 + tasks 2 + actors 2 + 集群状态1 + 事件1 + Serve1 + 监控1）
+- ❌ **缺失**：4个（jobs 2 + datasets + placement groups）
 
 ### 按优先级分类的待实现 API
 
@@ -112,19 +111,25 @@
 2. **`GET /api/jobs/{job_id}`** - 单个Job详情
 
 #### 🟡 中优先级（影响部分页面）
-3. `GET /api/cluster_status` - 集群状态
-4. `GET /events` - 事件列表
+3. `GET /api/cluster_status` - ✅ 已实现
+4. `GET /events` - ✅ 已实现
 5. `GET /api/data/datasets/{job_id}` - Datasets
-6. `GET /api/serve/applications/` - Serve应用
+6. `GET /api/serve/applications/` - ✅ 已实现（兼容）
 7. `GET /api/v0/placement_groups/` - Placement Groups
 
 #### 🟢 低优先级（外部集成）
-10. `GET /api/grafana_health`
-11. `GET /api/prometheus_health`
+10. `GET /api/grafana_health` - ✅ 已实现
+11. `GET /api/prometheus_health` - ✅ 已实现
 
 ## 🎯 建议的实现顺序
 
 ### 阶段1：核心功能恢复（✅ 已完成）
+---
+- [x] 实现日志文件读取
+- [x] 实现节点详情
+- [x] 实现集群状态与事件 (API_STATUS、EVENTS)
+- [x] 修复 Serve API 501 报错
+- [x] 修复 Grafana 相关 health check
 ---
 ```go
 // 1. 实现日志文件读取 ✅
@@ -136,26 +141,34 @@ func (s *ServerHandler) getNode(...)
     // 返回简化的节点信息 + actors
 ```
 ---
-
 ### 阶段2：Jobs API 实现（当前优先级）
+---
 ---
 ```go
 // 3. 实现Jobs API（需要调查数据来源）
 func (s *ServerHandler) getJobs(...)
 func (s *ServerHandler) getJob(...)
 ```
+```output
+/var/folders/yc/26ppqtln1fb9zcycv0d8xw280000gn/T/main.go:7:33: syntax error: unexpected ..., expected expression
+/var/folders/yc/26ppqtln1fb9zcycv0d8xw280000gn/T/main.go:8:32: syntax error: unexpected ..., expected expression
+```
 ---
-
 ### 阶段3：完善历史数据查询（短期）
+---
 ---
 ```go
 // 4. 集群状态和事件
 func (s *ServerHandler) getClusterStatus(...)
 func (s *ServerHandler) getEvents(...)
 ```
+```output
+/var/folders/yc/26ppqtln1fb9zcycv0d8xw280000gn/T/main.go:7:42: syntax error: unexpected ..., expected expression
+/var/folders/yc/26ppqtln1fb9zcycv0d8xw280000gn/T/main.go:8:35: syntax error: unexpected ..., expected expression
+```
 ---
-
 ### 阶段3：高级功能（中期）
+---
 ---
 ```go
 // 5. Data/Serve/Placement相关
@@ -163,8 +176,12 @@ func (s *ServerHandler) getDatasets(...)
 func (s *ServerHandler) getServeApplications(...)
 func (s *ServerHandler) getPlacementGroups(...)
 ```
+```output
+/var/folders/yc/26ppqtln1fb9zcycv0d8xw280000gn/T/main.go:7:37: syntax error: unexpected ..., expected expression
+/var/folders/yc/26ppqtln1fb9zcycv0d8xw280000gn/T/main.go:8:46: syntax error: unexpected ..., expected expression
+/var/folders/yc/26ppqtln1fb9zcycv0d8xw280000gn/T/main.go:9:44: syntax error: unexpected ..., expected expression
+```
 ---
-
 ## 🔍 旧版本实现参考
 
 旧版本（kuberay-KunWuLuan）中这些API的实现方式：
