@@ -2,6 +2,8 @@ package eventserver
 
 import (
 	"bufio"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
 	"sort"
@@ -35,6 +37,64 @@ type JobSubmissionInfo struct {
 	EndTime      time.Time
 	Status       types.JobStatus
 	Message      string
+}
+
+func hexToBase64(hexID string) string {
+	hexID = strings.TrimSpace(hexID)
+	if hexID == "" {
+		return ""
+	}
+	decoded, err := hex.DecodeString(hexID)
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(decoded)
+}
+
+func (h *EventHandler) inferDriverNodeIDFromLogs(clusterInfo utils.ClusterInfo, submissionID string) string {
+	if h.reader == nil {
+		return ""
+	}
+	if submissionID == "" || clusterInfo.SessionName == "" {
+		return ""
+	}
+
+	physicalClusterKey := clusterInfo.Name + "_" + clusterInfo.Namespace
+	logsPath := clusterInfo.SessionName + "/logs/"
+
+	nodeDirList := h.reader.ListFiles(physicalClusterKey, logsPath)
+	if len(nodeDirList) == 0 {
+		return ""
+	}
+
+	logCandidates := []string{
+		"job-driver-" + submissionID + ".log",
+		".job-driver-" + submissionID + ".log",
+		"job-driver-" + submissionID + ".log.metadata",
+		".job-driver-" + submissionID + ".log.metadata",
+	}
+
+	for _, nodeDir := range nodeDirList {
+		nodeHex := strings.TrimSuffix(strings.TrimSpace(nodeDir), "/")
+		if nodeHex == "" || nodeHex == "." {
+			continue
+		}
+
+		files := h.reader.ListFiles(physicalClusterKey, clusterInfo.SessionName+"/logs/"+nodeHex)
+		if len(files) == 0 {
+			continue
+		}
+
+		for _, f := range files {
+			for _, cand := range logCandidates {
+				if f == cand {
+					return hexToBase64(nodeHex)
+				}
+			}
+		}
+	}
+
+	return ""
 }
 
 // parseJobsLog reads event_JOBS.log and extracts job information
@@ -318,6 +378,10 @@ func (h *EventHandler) createJobsFromJobsLog(clusterInfo utils.ClusterInfo) {
 			Type:         "SUBMISSION",
 		}
 
+		if job.DriverNodeID == "" {
+			job.DriverNodeID = h.inferDriverNodeIDFromLogs(clusterInfo, submissionID)
+		}
+
 		// Add state transition events
 		if !jobInfo.StartTime.IsZero() {
 			job.Events = append(job.Events, types.JobStateEvent{
@@ -344,6 +408,7 @@ func (h *EventHandler) createJobsFromJobsLog(clusterInfo utils.ClusterInfo) {
 			j.Message = job.Message
 			j.Type = job.Type
 			j.Events = job.Events
+			j.DriverNodeID = job.DriverNodeID
 		})
 		logrus.Infof("[createJobsFromJobsLog] Created/merged job %s (submission_id=%s, status=%s) for cluster %s",
 			jobID, submissionID, jobInfo.Status, clusterKey)

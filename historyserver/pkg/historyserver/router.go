@@ -1595,6 +1595,18 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 		// Get file content from object storage using the reader
 		reader := s.reader.GetContent(clusterNameID+"_"+clusterNamespace, filePath)
 		if reader == nil {
+			// Some Ray log files are dot-prefixed (hidden). Best-effort fallback for job-driver logs.
+			if strings.HasPrefix(filename, "job-driver-") && strings.HasSuffix(filename, ".log") {
+				altFilename := "." + filename
+				altPath := path.Join(sessionName, "logs", nodeID, altFilename)
+				altReader := s.reader.GetContent(clusterNameID+"_"+clusterNamespace, altPath)
+				if altReader != nil {
+					filePath = altPath
+					reader = altReader
+				}
+			}
+		}
+		if reader == nil {
 			logrus.Warnf("Log file not found in storage: %s", filePath)
 			resp.WriteErrorString(http.StatusNotFound, fmt.Sprintf("Log file not found: %s", filePath))
 			return
