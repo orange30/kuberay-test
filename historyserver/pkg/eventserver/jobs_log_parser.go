@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -189,7 +190,20 @@ func (h *EventHandler) getJobsLogFiles(clusterInfo utils.ClusterInfo) []string {
 // Note: This means Tasks/Actors may not be correctly associated if they use Base64 job_id
 // A future improvement would be to read DRIVER_JOB_DEFINITION_EVENT to get the mapping
 func (h *EventHandler) mapSubmissionIDToJobID(clusterInfo utils.ClusterInfo, submissionID string) string {
-	logrus.Debugf("[mapSubmissionIDToJobID] Using submission_id=%s as job_id", submissionID)
+	clusterKey := clusterInfo.Name + "_" + clusterInfo.Namespace
+	if clusterInfo.SessionName != "" {
+		clusterKey = clusterKey + "_" + clusterInfo.SessionName
+	}
+
+	// Best-effort mapping: if we already have jobs with SubmissionID populated, reuse that JobID.
+	for _, j := range h.GetJobs(clusterKey) {
+		if j.SubmissionID == submissionID && j.JobID != "" {
+			logrus.Debugf("[mapSubmissionIDToJobID] Mapped submission_id=%s -> job_id=%s", submissionID, j.JobID)
+			return j.JobID
+		}
+	}
+
+	logrus.Debugf("[mapSubmissionIDToJobID] No mapping found for submission_id=%s, fallback to submission_id as job_id", submissionID)
 	return submissionID
 }
 
@@ -207,12 +221,93 @@ func (h *EventHandler) createJobsFromJobsLog(clusterInfo utils.ClusterInfo) {
 		return
 	}
 
-	// Create Job objects
-	for submissionID, jobInfo := range jobsMap {
-		// Map submission_id to job_id
-		jobID := h.mapSubmissionIDToJobID(clusterInfo, submissionID)
+	// Try to infer the real Ray JobID (base64) from tasks.
+	// TASK_LIFECYCLE_EVENT includes jobId; after parsing events, tasks should have Task.JobID populated.
+	tasks := h.GetTasks(clusterKey)
+	type jobCandidate struct {
+		JobID       string
+		EarliestRun time.Time
+		LatestEnd   time.Time
+	}
+	byJob := make(map[string]*jobCandidate)
+	for _, t := range tasks {
+		if t.JobID == "" {
+			continue
+		}
+		c, ok := byJob[t.JobID]
+		if !ok {
+			c = &jobCandidate{JobID: t.JobID}
+			byJob[t.JobID] = c
+		}
+		if !t.StartTime.IsZero() {
+			if c.EarliestRun.IsZero() || t.StartTime.Before(c.EarliestRun) {
+				c.EarliestRun = t.StartTime
+			}
+		}
+		if !t.EndTime.IsZero() {
+			if c.LatestEnd.IsZero() || t.EndTime.After(c.LatestEnd) {
+				c.LatestEnd = t.EndTime
+			}
+		}
+	}
+	jobCandidates := make([]jobCandidate, 0, len(byJob))
+	for _, c := range byJob {
+		jobCandidates = append(jobCandidates, *c)
+	}
+	sort.Slice(jobCandidates, func(i, j int) bool {
+		// Put zero times at the end.
+		a := jobCandidates[i].EarliestRun
+		b := jobCandidates[j].EarliestRun
+		if a.IsZero() && b.IsZero() {
+			return jobCandidates[i].JobID < jobCandidates[j].JobID
+		}
+		if a.IsZero() {
+			return false
+		}
+		if b.IsZero() {
+			return true
+		}
+		return a.Before(b)
+	})
 
-		// Create Job object
+	// Sort submission jobs by start time to align with task-derived job IDs.
+	type submissionJob struct {
+		SubmissionID string
+		Info         *JobSubmissionInfo
+	}
+	orderedSubs := make([]submissionJob, 0, len(jobsMap))
+	for submissionID, info := range jobsMap {
+		orderedSubs = append(orderedSubs, submissionJob{SubmissionID: submissionID, Info: info})
+	}
+	sort.Slice(orderedSubs, func(i, j int) bool {
+		a := orderedSubs[i].Info.StartTime
+		b := orderedSubs[j].Info.StartTime
+		if a.IsZero() && b.IsZero() {
+			return orderedSubs[i].SubmissionID < orderedSubs[j].SubmissionID
+		}
+		if a.IsZero() {
+			return false
+		}
+		if b.IsZero() {
+			return true
+		}
+		return a.Before(b)
+	})
+
+	// Create/merge Job objects.
+	for idx, sub := range orderedSubs {
+		submissionID := sub.SubmissionID
+		jobInfo := sub.Info
+
+		jobID := ""
+		if idx < len(jobCandidates) {
+			jobID = jobCandidates[idx].JobID
+		}
+		if jobID == "" {
+			// Fallback to any existing mapping, otherwise use submission_id.
+			jobID = h.mapSubmissionIDToJobID(clusterInfo, submissionID)
+		}
+
 		job := types.Job{
 			JobID:        jobID,
 			SubmissionID: submissionID,
@@ -220,7 +315,7 @@ func (h *EventHandler) createJobsFromJobsLog(clusterInfo utils.ClusterInfo) {
 			StartTime:    jobInfo.StartTime,
 			EndTime:      jobInfo.EndTime,
 			Message:      jobInfo.Message,
-			Type:         "SUBMISSION", // Assume all jobs from event_JOBS.log are submission jobs
+			Type:         "SUBMISSION",
 		}
 
 		// Add state transition events
@@ -250,7 +345,7 @@ func (h *EventHandler) createJobsFromJobsLog(clusterInfo utils.ClusterInfo) {
 			j.Type = job.Type
 			j.Events = job.Events
 		})
-		logrus.Infof("[createJobsFromJobsLog] Created job %s (submission_id=%s, status=%s) for cluster %s",
+		logrus.Infof("[createJobsFromJobsLog] Created/merged job %s (submission_id=%s, status=%s) for cluster %s",
 			jobID, submissionID, jobInfo.Status, clusterKey)
 	}
 }

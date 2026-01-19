@@ -256,6 +256,7 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 		taskId, _ := lifecycleEvent["taskId"].(string)
 		taskAttempt, _ := lifecycleEvent["taskAttempt"].(float64)
 		transitions, _ := lifecycleEvent["stateTransitions"].([]any)
+		jobId, _ := lifecycleEvent["jobId"].(string)
 
 		nodeId, _ := lifecycleEvent["nodeId"].(string)
 		workerId, _ := lifecycleEvent["workerId"].(string)
@@ -321,6 +322,10 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 			}
 
 			t.State = t.Events[len(t.Events)-1].State
+
+			if t.JobID == "" && jobId != "" {
+				t.JobID = jobId
+			}
 
 			if nodeId != "" {
 				t.NodeID = nodeId
