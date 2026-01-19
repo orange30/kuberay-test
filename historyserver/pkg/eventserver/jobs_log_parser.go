@@ -2,10 +2,7 @@ package eventserver
 
 import (
 	"bufio"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -156,8 +153,8 @@ func (h *EventHandler) getJobsLogFiles(clusterInfo utils.ClusterInfo) []string {
 	// List all node_id directories in logs/
 	logsPath := sessionName + "/logs/"
 	nodeDirList := h.reader.ListFiles(clusterKey, logsPath)
-	
-	logrus.Infof("[getJobsLogFiles] cluster=%s, session=%s, logsPath=%s", 
+
+	logrus.Infof("[getJobsLogFiles] cluster=%s, session=%s, logsPath=%s",
 		clusterKey, sessionName, logsPath)
 	logrus.Infof("[getJobsLogFiles] nodeDirList count=%d, dirs=%v", len(nodeDirList), nodeDirList)
 
@@ -171,7 +168,7 @@ func (h *EventHandler) getJobsLogFiles(clusterInfo utils.ClusterInfo) []string {
 
 		// Construct path to event_JOBS.log: logs/{node_id}/events/event_JOBS.log
 		eventJobsLogPath := logsPath + nodeDir + "events/event_JOBS.log"
-		
+
 		// Check if the file exists by trying to get its content
 		// We'll just add it to the list and let parseJobsLog handle missing files
 		jobsLogFiles = append(jobsLogFiles, eventJobsLogPath)
@@ -182,52 +179,16 @@ func (h *EventHandler) getJobsLogFiles(clusterInfo utils.ClusterInfo) []string {
 	return jobsLogFiles
 }
 
-// mapSubmissionIDToJobID maps submission_id to job_id by examining job_events/ directory structure
+// mapSubmissionIDToJobID maps submission_id to job_id
+// For now, we directly use submission_id as job_id because:
+// 1. There's no reliable way to map submission_id to Base64 job_id without reading event content
+// 2. Not all jobs in event_JOBS.log have corresponding job_events (e.g., early failures)
+// 3. This ensures all jobs are visible in the Dashboard
+//
+// Note: This means Tasks/Actors may not be correctly associated if they use Base64 job_id
+// A future improvement would be to read DRIVER_JOB_DEFINITION_EVENT to get the mapping
 func (h *EventHandler) mapSubmissionIDToJobID(clusterInfo utils.ClusterInfo, submissionID string) string {
-	clusterKey := clusterInfo.Name + "_" + clusterInfo.Namespace
-	sessionName := clusterInfo.SessionName
-	if sessionName == "" {
-		sessionName = "default"
-	}
-
-	// List all job IDs from job_events/ directory
-	jobEventsPath := path.Join(sessionName, "job_events")
-	jobDirs := h.reader.ListFiles(clusterKey, jobEventsPath)
-
-	// For each job ID directory, check if it contains events for this submission_id
-	// We can't directly map without examining the events, so we'll use a heuristic:
-	// Try to find job-driver log files that match the submission_id
-	logsPath := path.Join(sessionName, "logs")
-	allLogFiles := h.reader.ListFiles(clusterKey, logsPath)
-
-	// Look for job-driver-{submission_id}.log files
-	driverLogPattern := fmt.Sprintf("job-driver-%s.log", submissionID)
-	for _, file := range allLogFiles {
-		if strings.Contains(file, driverLogPattern) {
-			// Found the driver log file
-			logrus.Debugf("[mapSubmissionIDToJobID] Found driver log for submission_id %s", submissionID)
-			// Now we need to find the corresponding job_id
-			// We'll iterate through job directories and look for events
-			break
-		}
-	}
-
-	// If we can't find a mapping, generate a job_id from submission_id
-	// This is a fallback - ideally we should read the actual job events
-	// For now, we'll use a simple counter-based approach
-	for i, jobDir := range jobDirs {
-		if strings.HasSuffix(jobDir, "/") {
-			jobIDBase64 := strings.TrimSuffix(jobDir, "/")
-			// Decode to get the actual job ID
-			jobIDBytes, err := base64.StdEncoding.DecodeString(jobIDBase64)
-			if err == nil {
-				jobID := string(jobIDBytes)
-				logrus.Debugf("[mapSubmissionIDToJobID] Job %d: %s (decoded: %s)", i, jobIDBase64, jobID)
-			}
-		}
-	}
-
-	// Return submission_id as job_id for now (will be improved)
+	logrus.Debugf("[mapSubmissionIDToJobID] Using submission_id=%s as job_id", submissionID)
 	return submissionID
 }
 

@@ -753,7 +753,7 @@ func (h *EventHandler) getAllJobEventFiles(clusterInfo utils.ClusterInfo) []stri
 	jobEventDirPrefix := clusterInfo.SessionName + "/job_events/"
 	jobDirList := h.reader.ListFiles(clusterNameID, jobEventDirPrefix)
 
-	logrus.Infof("[getAllJobEventFiles] cluster=%s, session=%s, jobEventDirPrefix=%s", 
+	logrus.Infof("[getAllJobEventFiles] cluster=%s, session=%s, jobEventDirPrefix=%s",
 		clusterNameID, clusterInfo.SessionName, jobEventDirPrefix)
 	logrus.Infof("[getAllJobEventFiles] jobDirList count=%d, dirs=%v", len(jobDirList), jobDirList)
 
