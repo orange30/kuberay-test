@@ -1795,11 +1795,7 @@ func (s *ServerHandler) getTaskDetail(req *restful.Request, resp *restful.Respon
 
 	taskResults := make([]interface{}, 0, len(tasks))
 	for _, task := range tasks {
-		formatted := formatTaskForResponse(task)
-		// If detail=1, include additional fields (for now, we already return all fields)
-		if detailed {
-			// Future: add more detailed fields here if needed
-		}
+		formatted := formatTaskForResponse(task, detailed)
 		taskResults = append(taskResults, formatted)
 	}
 
@@ -1825,8 +1821,23 @@ func (s *ServerHandler) getTaskDetail(req *restful.Request, resp *restful.Respon
 	resp.Write(respData)
 }
 
+
+func strOrNil(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func mapStringStringOrNil(m map[string]string) interface{} {
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
 // formatTaskForResponse converts an eventtypes.Task to the format expected by Ray Dashboard
-func formatTaskForResponse(task eventtypes.Task) map[string]interface{} {
+func formatTaskForResponse(task eventtypes.Task, detailed bool) map[string]interface{} {
 	// Convert Base64 IDs to Hex format for Dashboard display
 	taskIDHex := base64ToHex(task.TaskID)
 	nodeIDHex := base64ToHex(task.NodeID)
@@ -1835,6 +1846,46 @@ func formatTaskForResponse(task eventtypes.Task) map[string]interface{} {
 	jobIDHex := base64ToHex(task.JobID)
 	pgIDHex := base64ToHex(task.PlacementGroupID)
 
+	var events []interface{}
+	for _, e := range task.Events {
+		var createdMs interface{}
+		if !e.Timestamp.IsZero() {
+			createdMs = e.Timestamp.UnixMilli()
+		} else {
+			createdMs = nil
+		}
+		events = append(events, map[string]interface{}{
+			"state":      string(e.State),
+			"created_ms": createdMs,
+		})
+	}
+	if events == nil {
+		events = []interface{}{}
+	}
+
+	var taskLogInfo interface{}
+	if task.Type == eventtypes.ACTOR_TASK || workerIDHex == "" || nodeIDHex == "" {
+		// Align with Ray Dashboard behavior:
+		// - Actor task logs are typically not recorded by default.
+		// - If we don't have enough info to locate worker logs, expose logs as unavailable.
+		taskLogInfo = nil
+	} else if len(task.TaskLogInfo) > 0 {
+		taskLogInfo = task.TaskLogInfo
+	} else {
+		// Non-nil marker to let the UI show stdout/stderr tabs when worker_id exists.
+		taskLogInfo = map[string]interface{}{}
+	}
+
+	profilingData := map[string]interface{}{
+		"events": []interface{}{},
+	}
+
+	// Ensure required_resources is empty object {} instead of null for better UI compatibility
+	requiredResources := task.RequiredResources
+	if requiredResources == nil {
+		requiredResources = make(map[string]float64)
+	}
+
 	result := map[string]interface{}{
 		"task_id":            taskIDHex,
 		"name":               task.Name,
@@ -1842,30 +1893,45 @@ func formatTaskForResponse(task eventtypes.Task) map[string]interface{} {
 		"state":              string(task.State),
 		"job_id":             jobIDHex,
 		"node_id":            nodeIDHex,
-		"actor_id":           actorIDHex,
-		"placement_group_id": pgIDHex,
+		"actor_id":           strOrNil(actorIDHex),
+		"placement_group_id": strOrNil(pgIDHex),
 		"type":               string(task.Type),
 		"func_or_class_name": task.FuncOrClassName,
 		"language":           task.Language,
-		"required_resources": task.RequiredResources,
-		"worker_id":          workerIDHex,
-		"error_type":         task.ErrorType,
-		"error_message":      task.ErrorMessage,
-		"call_site":          task.CallSite,
+		"required_resources": requiredResources,
+		"runtime_env_info":   "",
+		"events":             events,
+		"worker_id":          strOrNil(workerIDHex),
+		"profiling_data":     profilingData,
+		"error_type":         strOrNil(task.ErrorType),
+		"error_message":      strOrNil(task.ErrorMessage),
+		"task_log_info":      taskLogInfo,
+		"call_site":          strOrNil(task.CallSite),
+		"label_selector":     mapStringStringOrNil(task.LabelSelector),
 	}
 
-	// Dashboard expects start_time_ms and end_time_ms (note the _ms suffix)
-	// Use -1 for unset times to indicate "not available"
+	// Dashboard expects start_time_ms and end_time_ms
 	if !task.StartTime.IsZero() {
 		result["start_time_ms"] = task.StartTime.UnixMilli()
 	} else {
-		result["start_time_ms"] = -1
+		result["start_time_ms"] = nil
 	}
 
 	if !task.EndTime.IsZero() {
 		result["end_time_ms"] = task.EndTime.UnixMilli()
 	} else {
-		result["end_time_ms"] = -1
+		result["end_time_ms"] = nil
+	}
+
+	if detailed {
+		// Best-effort compatibility with Ray State API: include common keys even when we don't have data.
+		result["parent_task_id"] = nil
+		result["creation_time_ms"] = nil
+		result["worker_pid"] = nil
+		result["node_ip_address"] = nil
+		result["runtime_env"] = nil
+		result["message"] = nil
+		result["error"] = nil
 	}
 
 	return result

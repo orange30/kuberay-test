@@ -238,12 +238,47 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 
 		taskMap := h.ClusterTaskMap.GetOrCreateTaskMap(currentClusterName)
 		taskMap.CreateOrMergeAttempt(currTask.TaskID, currTask.AttemptNumber, func(t *types.Task) {
-			// Merge definition fields (preserve existing Events if any)
+			// Merge definition fields while preserving lifecycle-derived fields.
 			existingEvents := t.Events
+			existingState := t.State
+			existingJobID := t.JobID
+			existingNodeID := t.NodeID
+			existingWorkerID := t.WorkerID
+			existingStartTime := t.StartTime
+			existingEndTime := t.EndTime
+			existingTaskLogInfo := t.TaskLogInfo
+			existingErrorType := t.ErrorType
+			existingErrorMessage := t.ErrorMessage
+
 			*t = currTask
+
 			if len(existingEvents) > 0 {
 				t.Events = existingEvents
-				t.State = existingEvents[len(existingEvents)-1].State
+				t.State = existingState
+			}
+			if t.JobID == "" {
+				t.JobID = existingJobID
+			}
+			if t.NodeID == "" {
+				t.NodeID = existingNodeID
+			}
+			if t.WorkerID == "" {
+				t.WorkerID = existingWorkerID
+			}
+			if t.StartTime.IsZero() {
+				t.StartTime = existingStartTime
+			}
+			if t.EndTime.IsZero() {
+				t.EndTime = existingEndTime
+			}
+			if len(t.TaskLogInfo) == 0 {
+				t.TaskLogInfo = existingTaskLogInfo
+			}
+			if t.ErrorType == "" {
+				t.ErrorType = existingErrorType
+			}
+			if t.ErrorMessage == "" {
+				t.ErrorMessage = existingErrorMessage
 			}
 		})
 
@@ -323,7 +358,7 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 
 			t.State = t.Events[len(t.Events)-1].State
 
-			if t.JobID == "" && jobId != "" {
+			if jobId != "" {
 				t.JobID = jobId
 			}
 

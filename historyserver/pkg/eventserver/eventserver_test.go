@@ -366,6 +366,85 @@ func TestStoreEvent(t *testing.T) {
 	}
 }
 
+func TestTaskDefinitionDoesNotOverwriteLifecycleFields(t *testing.T) {
+	h := &EventHandler{
+		ClusterTaskMap: &types.ClusterTaskMap{ClusterTaskMap: make(map[string]*types.TaskMap)},
+	}
+
+	cluster := "cluster1"
+	taskID := "taskid1"
+
+	// First, store a lifecycle event that populates job/node/worker and timing.
+	start := time.Unix(0, 1_000_000_000).UTC() // 1s
+	end := time.Unix(0, 2_000_000_000).UTC()   // 2s
+	life := map[string]any{
+		"eventType":   string(types.TASK_LIFECYCLE_EVENT),
+		"clusterName": cluster,
+		"taskLifecycleEvent": map[string]any{
+			"taskId":      taskID,
+			"taskAttempt": float64(0),
+			"jobId":       "job-base64",
+			"nodeId":      "node-base64",
+			"workerId":    "worker-base64",
+			"stateTransitions": []any{
+				map[string]any{"state": "RUNNING", "timestamp": start.Format(time.RFC3339Nano)},
+				map[string]any{"state": "FINISHED", "timestamp": end.Format(time.RFC3339Nano)},
+			},
+		},
+	}
+	if err := h.storeEvent(life); err != nil {
+		t.Fatalf("storeEvent(lifecycle) error: %v", err)
+	}
+
+	// Then, store a definition event that (in real Ray) may not include node/worker/timing.
+	def := map[string]any{
+		"eventType":   string(types.TASK_DEFINITION_EVENT),
+		"clusterName": cluster,
+		"taskDefinitionEvent": map[string]any{
+			"taskId":      taskID,
+			"taskName":    "MyTask",
+			"taskAttempt": 0,
+		},
+	}
+	if err := h.storeEvent(def); err != nil {
+		t.Fatalf("storeEvent(definition) error: %v", err)
+	}
+
+	clusterObj, ok := h.ClusterTaskMap.ClusterTaskMap[cluster]
+	if !ok {
+		t.Fatalf("cluster %s not found", cluster)
+	}
+	clusterObj.Lock()
+	defer clusterObj.Unlock()
+	attempts, ok := clusterObj.TaskMap[taskID]
+	if !ok || len(attempts) != 1 {
+		t.Fatalf("task %s attempts not found or unexpected count: %v", taskID, attempts)
+	}
+
+	got := attempts[0]
+	if got.Name != "MyTask" {
+		t.Fatalf("task name overwritten unexpectedly: got=%q", got.Name)
+	}
+	if got.JobID != "job-base64" {
+		t.Fatalf("jobId lost: got=%q", got.JobID)
+	}
+	if got.NodeID != "node-base64" {
+		t.Fatalf("nodeId lost: got=%q", got.NodeID)
+	}
+	if got.WorkerID != "worker-base64" {
+		t.Fatalf("workerId lost: got=%q", got.WorkerID)
+	}
+	if got.StartTime.IsZero() || got.StartTime.UnixNano() != start.UnixNano() {
+		t.Fatalf("startTime lost: got=%v", got.StartTime)
+	}
+	if got.EndTime.IsZero() || got.EndTime.UnixNano() != end.UnixNano() {
+		t.Fatalf("endTime lost: got=%v", got.EndTime)
+	}
+	if len(got.Events) != 2 {
+		t.Fatalf("events lost: got=%v", got.Events)
+	}
+}
+
 // TestTaskLifecycleEventDeduplication verifies that duplicate events are correctly filtered
 // and out-of-order events are properly sorted
 func TestTaskLifecycleEventDeduplication(t *testing.T) {
