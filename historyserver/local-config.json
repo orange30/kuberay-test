@@ -1,0 +1,7 @@
+{
+  "s3Bucket": "ray-historyserver",
+  "s3Endpoint": "192.168.129.137:30900",
+  "s3Region": "test",
+  "s3ForcePathStyle": "true",
+  "s3DisableSSL": "true"
+}

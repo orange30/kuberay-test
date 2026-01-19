@@ -1,0 +1,22 @@
+# Node.js
+dashboard/v2.51.0/client/node_modules
+dashboard/v2.51.0/client/build
+dashboard/**/node_modules
+dashboard/**/build
+
+# Go
+output/
+*.test
+*.out
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Misc
+*.md
+!README.md
