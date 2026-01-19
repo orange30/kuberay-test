@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"sort"
 	"strings"
 	"time"
@@ -790,6 +791,51 @@ func bytesTrimSpace(b []byte) []byte {
 	return b[start:end]
 }
 
+func readTailLines(r io.Reader, lines int) ([]byte, error) {
+	if lines <= 0 {
+		return io.ReadAll(r)
+	}
+	const maxTailLines = 200000
+	if lines > maxTailLines {
+		lines = maxTailLines
+	}
+
+	br := bufio.NewReader(r)
+	ring := make([][]byte, lines)
+	count := 0
+	idx := 0
+
+	for {
+		b, err := br.ReadBytes('\n')
+		if len(b) > 0 {
+			cp := make([]byte, len(b))
+			copy(cp, b)
+			ring[idx] = cp
+			idx = (idx + 1) % lines
+			if count < lines {
+				count++
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	start := 0
+	if count == lines {
+		start = idx
+	}
+
+	out := make([]byte, 0)
+	for i := 0; i < count; i++ {
+		out = append(out, ring[(start+i)%lines]...)
+	}
+	return out, nil
+}
+
 func (s *ServerHandler) getPrometheusHealth(req *restful.Request, resp *restful.Response) {
 	sessionName, _ := req.Attribute(COOKIE_SESSION_NAME_KEY).(string)
 	if sessionName == "live" {
@@ -1483,6 +1529,13 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 	taskID := req.QueryParameter("task_id")
 	filename := req.QueryParameter("filename")
 	suffix := req.QueryParameter("suffix") // "out" or "err"
+	linesStr := req.QueryParameter("lines")
+	lines := 0
+	if linesStr != "" {
+		if n, err := strconv.Atoi(linesStr); err == nil {
+			lines = n
+		}
+	}
 
 	// Support both node_id and task_id based log retrieval
 	var filePath string
@@ -1493,6 +1546,9 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 
 		// Get task to find its node
 		clusterKey := clusterNameID + "_" + clusterNamespace
+		if sessionName != "" {
+			clusterKey = clusterKey + "_" + sessionName
+		}
 		tasks := s.eventHandler.GetTasks(clusterKey)
 
 		var foundTask *eventtypes.Task
@@ -1575,12 +1631,14 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 			// Set appropriate content type
 			resp.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
-			// Copy the content from reader to response
-			_, err := io.Copy(resp, reader)
+			// Copy the content from reader to response (best-effort tail)
+			data, err := readTailLines(reader, lines)
 			if err != nil {
 				logrus.Errorf("Failed to write log file content: %v", err)
 				resp.WriteErrorString(http.StatusInternalServerError, "Failed to read log file")
+				return
 			}
+			_, _ = resp.Write(data)
 			return
 		}
 
@@ -1615,13 +1673,14 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 		// Set appropriate content type
 		resp.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
-		// Copy the content from reader to response
-		_, err := io.Copy(resp, reader)
+		// Copy the content from reader to response (best-effort tail)
+		data, err := readTailLines(reader, lines)
 		if err != nil {
 			logrus.Errorf("Failed to write log file content: %v", err)
 			resp.WriteErrorString(http.StatusInternalServerError, "Failed to read log file")
 			return
 		}
+		_, _ = resp.Write(data)
 	} else {
 		resp.WriteErrorString(http.StatusBadRequest, "Either node_id+filename or task_id is required")
 		return
