@@ -77,11 +77,13 @@ func (h *EventHandler) ProcessEvents(ctx context.Context, ch <-chan map[string]a
 // Run will start numOfEventProcessors (default to 5) processing functions and the event reader. The event reader will run once an hr,
 // which is currently how often the collector flushes.
 func (h *EventHandler) Run(stop chan struct{}, numOfEventProcessors int) error {
+	logrus.Info("🚀 EventHandler.Run() started") // 明显的启动标记
 	var wg sync.WaitGroup
 
 	if numOfEventProcessors == 0 {
 		numOfEventProcessors = 5
 	}
+	logrus.Infof("Creating %d event processor channels", numOfEventProcessors)
 	eventProcessorChannels := make([]chan map[string]any, numOfEventProcessors)
 	cctx := make([]context.CancelFunc, numOfEventProcessors)
 
@@ -160,6 +162,10 @@ func (h *EventHandler) Run(stop chan struct{}, numOfEventProcessors int) error {
 						eventProcessorChannels[i%numOfEventProcessors] <- curr
 					}
 				}
+
+				// After processing structured events, parse event_JOBS.log as fallback
+				logrus.Infof("[EventHandler] Parsing event_JOBS.log for cluster %s", clusterInfo.Name)
+				h.createJobsFromJobsLog(clusterInfo)
 			}
 		}
 
@@ -747,19 +753,29 @@ func (h *EventHandler) getAllJobEventFiles(clusterInfo utils.ClusterInfo) []stri
 	jobEventDirPrefix := clusterInfo.SessionName + "/job_events/"
 	jobDirList := h.reader.ListFiles(clusterNameID, jobEventDirPrefix)
 
+	logrus.Infof("[getAllJobEventFiles] cluster=%s, session=%s, jobEventDirPrefix=%s", 
+		clusterNameID, clusterInfo.SessionName, jobEventDirPrefix)
+	logrus.Infof("[getAllJobEventFiles] jobDirList count=%d, dirs=%v", len(jobDirList), jobDirList)
+
 	for _, jobDir := range jobDirList {
 		// Skip non-directory entries
 		if !strings.HasSuffix(jobDir, "/") {
+			logrus.Debugf("[getAllJobEventFiles] Skip non-directory: %s", jobDir)
 			continue
 		}
 		jobDirPath := jobEventDirPrefix + jobDir
 		jobFiles := h.reader.ListFiles(clusterNameID, jobDirPath)
+		logrus.Infof("[getAllJobEventFiles] jobDir=%s, files count=%d, files=%v", jobDir, len(jobFiles), jobFiles)
 		for _, jobFile := range jobFiles {
 			if isValidEventFile(jobFile) {
 				allJobFiles = append(allJobFiles, jobDirPath+jobFile)
+				logrus.Infof("[getAllJobEventFiles] Added valid event file: %s", jobDirPath+jobFile)
+			} else {
+				logrus.Debugf("[getAllJobEventFiles] Skip invalid event file: %s", jobFile)
 			}
 		}
 	}
+	logrus.Infof("[getAllJobEventFiles] Total job event files found: %d", len(allJobFiles))
 	return allJobFiles
 }
 
