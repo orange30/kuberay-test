@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 
@@ -21,11 +22,13 @@ func main() {
 	kubeconfigs := ""
 	runtimeClassConfigPath := "/var/collector-config/data"
 	dashboardDir := ""
+	port := 8080
 	flag.StringVar(&runtimeClassName, "runtime-class-name", "", "")
 	flag.StringVar(&rayRootDir, "ray-root-dir", "", "")
 	flag.StringVar(&kubeconfigs, "kubeconfigs", "", "")
 	flag.StringVar(&dashboardDir, "dashboard-dir", "/dashboard", "")
 	flag.StringVar(&runtimeClassConfigPath, "runtime-class-config-path", "", "") //"/var/collector-config/data"
+	flag.IntVar(&port, "port", 8080, "HTTP listen port")
 	flag.Parse()
 
 	cliMgr := historyserver.NewClientManager(kubeconfigs)
@@ -78,7 +81,8 @@ func main() {
 		logrus.Info("EventHandler shutdown complete")
 	}()
 
-	handler := historyserver.NewServerHandler(&globalConfig, dashboardDir, reader, cliMgr, eventHandler)
+	listenAddr := ":" + strconv.Itoa(port)
+	handler := historyserver.NewServerHandler(&globalConfig, dashboardDir, listenAddr, reader, cliMgr, eventHandler)
 
 	sigChan := make(chan os.Signal, 1)
 	stop := make(chan struct{}, 1)

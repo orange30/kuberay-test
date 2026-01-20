@@ -19,6 +19,7 @@ type ServerHandler struct {
 	rayGrafanaHost       string
 	rayGrafanaIframeHost string
 	rayPrometheusHost    string
+	listenAddr           string
 
 	reader        storage.StorageReader
 	clientManager *ClientManager
@@ -26,7 +27,10 @@ type ServerHandler struct {
 	httpClient    *http.Client
 }
 
-func NewServerHandler(c *types.RayHistoryServerConfig, dashboardDir string, reader storage.StorageReader, clientManager *ClientManager, eventHandler *eventserver.EventHandler) *ServerHandler {
+func NewServerHandler(c *types.RayHistoryServerConfig, dashboardDir string, listenAddr string, reader storage.StorageReader, clientManager *ClientManager, eventHandler *eventserver.EventHandler) *ServerHandler {
+	if listenAddr == "" {
+		listenAddr = ":8080"
+	}
 	return &ServerHandler{
 		reader:        reader,
 		clientManager: clientManager,
@@ -37,6 +41,7 @@ func NewServerHandler(c *types.RayHistoryServerConfig, dashboardDir string, read
 		rayGrafanaIframeHost: c.RayGrafanaIframeHost,
 		rayPrometheusHost:    c.RayPrometheusHost,
 		dashboardDir:         dashboardDir,
+		listenAddr:           listenAddr,
 		// TODO: make this configurable
 		maxClusters: 100,
 		httpClient: &http.Client{
@@ -47,7 +52,7 @@ func NewServerHandler(c *types.RayHistoryServerConfig, dashboardDir string, read
 
 func (s *ServerHandler) Run(stop chan struct{}) error {
 	s.RegisterRouter()
-	port := ":8080"
+	port := s.listenAddr
 	server := &http.Server{
 		Addr:         port,             // Listen address
 		ReadTimeout:  5 * time.Second,  // Read timeout
