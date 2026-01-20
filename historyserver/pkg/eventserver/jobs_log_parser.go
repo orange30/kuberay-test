@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"regexp"
 	"sort"
 	"strconv"
@@ -49,6 +50,194 @@ func hexToBase64(hexID string) string {
 		return ""
 	}
 	return base64.StdEncoding.EncodeToString(decoded)
+}
+
+type jobDriverLogMetadata struct {
+	Entrypoint   string                 `json:"entrypoint"`
+	Metadata     map[string]string      `json:"metadata"`
+	RuntimeEnv   map[string]interface{} `json:"runtime_env"`
+	SubmissionID string                 `json:"submission_id"`
+	JobID        string                 `json:"job_id"`
+}
+
+func normalizeEntrypoint(entrypoint string) string {
+	ep := strings.TrimSpace(entrypoint)
+	if ep == "" {
+		return ""
+	}
+	// Some Ray logs include: "Running entrypoint for job <submission_id>: <cmd>".
+	// We want to display just <cmd>.
+	// Also handle the case where the prefix is already extracted into entrypoint.
+	if m := regexp.MustCompile(`(?i)^for\s+job\s+\S+\s*:\s*(.+)$`).FindStringSubmatch(ep); len(m) >= 2 {
+		return strings.TrimSpace(m[1])
+	}
+	return ep
+}
+
+func parseEntrypointFromDriverLog(r io.Reader) string {
+	if r == nil {
+		return ""
+	}
+	// Best-effort heuristics: scan first N lines for any "entrypoint" hint.
+	scanner := bufio.NewScanner(r)
+	// Allow moderately long lines.
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	entrypointPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\brunning\s+entrypoint\b(?:\s+for\s+job\s+\S+)?\s*[:=]\s*(.+)$`),
+		regexp.MustCompile(`(?i)\bentrypoint\b\s*[:=]\s*(.+)$`),
+		regexp.MustCompile(`(?i)\bentrypoint\b\s+(\S.+)$`),
+	}
+
+	for i := 0; i < 200 && scanner.Scan(); i++ {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		// Try JSON line first.
+		if strings.HasPrefix(line, "{") && strings.Contains(strings.ToLower(line), "entrypoint") {
+			var m map[string]interface{}
+			if err := json.Unmarshal([]byte(line), &m); err == nil {
+				if v, ok := m["entrypoint"].(string); ok {
+					v = normalizeEntrypoint(v)
+					if v != "" {
+						return v
+					}
+				}
+			}
+		}
+		for _, re := range entrypointPatterns {
+			matches := re.FindStringSubmatch(line)
+			if len(matches) >= 2 {
+				v := normalizeEntrypoint(matches[1])
+				if len(v) >= 2 {
+					if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
+						v = strings.TrimSpace(v[1 : len(v)-1])
+					}
+				}
+				v = normalizeEntrypoint(v)
+				if v != "" {
+					return v
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (h *EventHandler) findJobDriverFile(clusterInfo utils.ClusterInfo, submissionID string) (nodeHex string, filename string, fullPath string) {
+	if h.reader == nil {
+		return "", "", ""
+	}
+	if submissionID == "" || clusterInfo.SessionName == "" {
+		return "", "", ""
+	}
+	physicalClusterKey := clusterInfo.Name + "_" + clusterInfo.Namespace
+	logsPath := clusterInfo.SessionName + "/logs/"
+	for _, nodeDir := range h.reader.ListFiles(physicalClusterKey, logsPath) {
+		nodeHexCandidate := strings.TrimSuffix(strings.TrimSpace(nodeDir), "/")
+		if nodeHexCandidate == "" || nodeHexCandidate == "." {
+			continue
+		}
+		files := h.reader.ListFiles(physicalClusterKey, clusterInfo.SessionName+"/logs/"+nodeHexCandidate)
+		if len(files) == 0 {
+			files = h.reader.ListFiles(physicalClusterKey, clusterInfo.SessionName+"/logs/"+nodeHexCandidate+"/")
+		}
+		if len(files) == 0 {
+			continue
+		}
+		for _, f := range files {
+			cand := strings.TrimSpace(f)
+			if cand == "" {
+				continue
+			}
+			if cand == "job-driver-"+submissionID+".log" || cand == ".job-driver-"+submissionID+".log" ||
+				cand == "job-driver-"+submissionID+".log.metadata" || cand == ".job-driver-"+submissionID+".log.metadata" {
+				return nodeHexCandidate, cand, clusterInfo.SessionName + "/logs/" + nodeHexCandidate + "/" + cand
+			}
+		}
+	}
+	return "", "", ""
+}
+
+func (h *EventHandler) populateJobDetailsFromDriverLogs(clusterInfo utils.ClusterInfo, submissionID string, job *types.Job) {
+	if job == nil || h.reader == nil {
+		return
+	}
+	physicalClusterKey := clusterInfo.Name + "_" + clusterInfo.Namespace
+
+	// Prefer structured metadata if available.
+	nodeHex, filename, fullPath := h.findJobDriverFile(clusterInfo, submissionID)
+	_ = nodeHex
+	if fullPath != "" && strings.HasSuffix(filename, ".log.metadata") {
+		if r := h.reader.GetContent(physicalClusterKey, fullPath); r != nil {
+			b, err := io.ReadAll(r)
+			if err == nil {
+				var meta jobDriverLogMetadata
+				if err := json.Unmarshal(b, &meta); err == nil {
+					if job.Entrypoint == "" {
+						job.Entrypoint = normalizeEntrypoint(meta.Entrypoint)
+					}
+					if len(job.Metadata) == 0 && len(meta.Metadata) > 0 {
+						job.Metadata = meta.Metadata
+					}
+					if len(job.RuntimeEnv) == 0 && len(meta.RuntimeEnv) > 0 {
+						job.RuntimeEnv = meta.RuntimeEnv
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback: read driver log content and infer entrypoint.
+	if job.Entrypoint != "" {
+		return
+	}
+	// If we located metadata file, try to locate the corresponding .log in same node dir.
+	if nodeHex != "" {
+		logCandidates := []string{
+			"job-driver-" + submissionID + ".log",
+			".job-driver-" + submissionID + ".log",
+		}
+		for _, cand := range logCandidates {
+			p := clusterInfo.SessionName + "/logs/" + nodeHex + "/" + cand
+			if r := h.reader.GetContent(physicalClusterKey, p); r != nil {
+				if ep := parseEntrypointFromDriverLog(r); ep != "" {
+					job.Entrypoint = ep
+					return
+				}
+			}
+		}
+	}
+
+	// Last resort: search again specifically for a .log file.
+	if h.reader == nil {
+		return
+	}
+	logsPath := clusterInfo.SessionName + "/logs/"
+	for _, nodeDir := range h.reader.ListFiles(physicalClusterKey, logsPath) {
+		nodeHexCandidate := strings.TrimSuffix(strings.TrimSpace(nodeDir), "/")
+		if nodeHexCandidate == "" || nodeHexCandidate == "." {
+			continue
+		}
+		files := h.reader.ListFiles(physicalClusterKey, clusterInfo.SessionName+"/logs/"+nodeHexCandidate)
+		if len(files) == 0 {
+			files = h.reader.ListFiles(physicalClusterKey, clusterInfo.SessionName+"/logs/"+nodeHexCandidate+"/")
+		}
+		for _, f := range files {
+			cand := strings.TrimSpace(f)
+			if cand == "job-driver-"+submissionID+".log" || cand == ".job-driver-"+submissionID+".log" {
+				p := clusterInfo.SessionName + "/logs/" + nodeHexCandidate + "/" + cand
+				if r := h.reader.GetContent(physicalClusterKey, p); r != nil {
+					if ep := parseEntrypointFromDriverLog(r); ep != "" {
+						job.Entrypoint = ep
+						return
+					}
+				}
+			}
+		}
+	}
 }
 
 func (h *EventHandler) inferDriverNodeIDFromLogs(clusterInfo utils.ClusterInfo, submissionID string) string {
@@ -381,6 +570,7 @@ func (h *EventHandler) createJobsFromJobsLog(clusterInfo utils.ClusterInfo) {
 		if job.DriverNodeID == "" {
 			job.DriverNodeID = h.inferDriverNodeIDFromLogs(clusterInfo, submissionID)
 		}
+		h.populateJobDetailsFromDriverLogs(clusterInfo, submissionID, &job)
 
 		// Add state transition events
 		if !jobInfo.StartTime.IsZero() {
@@ -399,16 +589,40 @@ func (h *EventHandler) createJobsFromJobsLog(clusterInfo utils.ClusterInfo) {
 		// Store the job using JobMap's CreateOrMergeJob method
 		jobMap := h.ClusterJobMap.GetOrCreateJobMap(clusterKey)
 		jobMap.CreateOrMergeJob(jobID, func(j *types.Job) {
-			// Overwrite with data from event_JOBS.log
+			// Jobs from event_JOBS.log are a fallback source; avoid overwriting richer structured data.
 			j.JobID = job.JobID
-			j.SubmissionID = job.SubmissionID
+			if j.SubmissionID == "" {
+				j.SubmissionID = job.SubmissionID
+			}
+			if j.Type == "" {
+				j.Type = job.Type
+			}
+			// Status/timestamps are considered authoritative from jobs log when present.
 			j.Status = job.Status
-			j.StartTime = job.StartTime
-			j.EndTime = job.EndTime
-			j.Message = job.Message
-			j.Type = job.Type
-			j.Events = job.Events
-			j.DriverNodeID = job.DriverNodeID
+			if !job.StartTime.IsZero() {
+				j.StartTime = job.StartTime
+			}
+			if !job.EndTime.IsZero() {
+				j.EndTime = job.EndTime
+			}
+			if job.Message != "" {
+				j.Message = job.Message
+			}
+			if len(j.Events) == 0 && len(job.Events) > 0 {
+				j.Events = job.Events
+			}
+			if j.DriverNodeID == "" {
+				j.DriverNodeID = job.DriverNodeID
+			}
+			if j.Entrypoint == "" {
+				j.Entrypoint = job.Entrypoint
+			}
+			if len(j.Metadata) == 0 && len(job.Metadata) > 0 {
+				j.Metadata = job.Metadata
+			}
+			if len(j.RuntimeEnv) == 0 && len(job.RuntimeEnv) > 0 {
+				j.RuntimeEnv = job.RuntimeEnv
+			}
 		})
 		logrus.Infof("[createJobsFromJobsLog] Created/merged job %s (submission_id=%s, status=%s) for cluster %s",
 			jobID, submissionID, jobInfo.Status, clusterKey)
