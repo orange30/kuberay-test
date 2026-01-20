@@ -374,7 +374,7 @@ func TestTaskDefinitionDoesNotOverwriteLifecycleFields(t *testing.T) {
 	cluster := "cluster1"
 	taskID := "taskid1"
 
-	// First, store a lifecycle event that populates job/node/worker and timing.
+	// First, store a lifecycle event that populates job/node/worker, timing, and actorId.
 	start := time.Unix(0, 1_000_000_000).UTC() // 1s
 	end := time.Unix(0, 2_000_000_000).UTC()   // 2s
 	life := map[string]any{
@@ -384,6 +384,7 @@ func TestTaskDefinitionDoesNotOverwriteLifecycleFields(t *testing.T) {
 			"taskId":      taskID,
 			"taskAttempt": float64(0),
 			"jobId":       "job-base64",
+			"actorId":     "actor-base64",
 			"nodeId":      "node-base64",
 			"workerId":    "worker-base64",
 			"stateTransitions": []any{
@@ -428,6 +429,9 @@ func TestTaskDefinitionDoesNotOverwriteLifecycleFields(t *testing.T) {
 	if got.JobID != "job-base64" {
 		t.Fatalf("jobId lost: got=%q", got.JobID)
 	}
+	if got.ActorID != "actor-base64" {
+		t.Fatalf("actorId lost: got=%q", got.ActorID)
+	}
 	if got.NodeID != "node-base64" {
 		t.Fatalf("nodeId lost: got=%q", got.NodeID)
 	}
@@ -442,6 +446,51 @@ func TestTaskDefinitionDoesNotOverwriteLifecycleFields(t *testing.T) {
 	}
 	if len(got.Events) != 2 {
 		t.Fatalf("events lost: got=%v", got.Events)
+	}
+}
+
+func TestTaskLifecycleDerivesActorIDFromTaskID(t *testing.T) {
+	h := &EventHandler{
+		ClusterTaskMap: &types.ClusterTaskMap{ClusterTaskMap: make(map[string]*types.TaskMap)},
+	}
+
+	cluster := "cluster1"
+	// 24-byte TaskID (base64 raw) whose first 16 bytes base64-encode to: deMRpAb1iHbu09wNxfEs6g==
+	taskID := "deMRpAb1iHbu09wNxfEs6gC+ntYDAAAA"
+	start := time.Unix(0, 1_000_000_000).UTC() // 1s
+
+	life := map[string]any{
+		"eventType":   string(types.TASK_LIFECYCLE_EVENT),
+		"clusterName": cluster,
+		"taskLifecycleEvent": map[string]any{
+			"taskId":      taskID,
+			"taskAttempt": float64(0),
+			"stateTransitions": []any{
+				map[string]any{"state": string(types.PENDING_ACTOR_TASK_ARGS_FETCH), "timestamp": start.Format(time.RFC3339Nano)},
+			},
+		},
+	}
+	if err := h.storeEvent(life); err != nil {
+		t.Fatalf("storeEvent(lifecycle) error: %v", err)
+	}
+
+	clusterObj, ok := h.ClusterTaskMap.ClusterTaskMap[cluster]
+	if !ok {
+		t.Fatalf("cluster %s not found", cluster)
+	}
+	clusterObj.Lock()
+	defer clusterObj.Unlock()
+	attempts, ok := clusterObj.TaskMap[taskID]
+	if !ok || len(attempts) != 1 {
+		t.Fatalf("task %s attempts not found or unexpected count: %v", taskID, attempts)
+	}
+
+	got := attempts[0]
+	if got.ActorID != "deMRpAb1iHbu09wNxfEs6g==" {
+		t.Fatalf("actorId not derived: got=%q", got.ActorID)
+	}
+	if got.Type != types.ACTOR_TASK {
+		t.Fatalf("taskType not inferred: got=%q", got.Type)
 	}
 }
 

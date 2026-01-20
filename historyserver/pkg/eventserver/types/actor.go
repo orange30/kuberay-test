@@ -172,21 +172,21 @@ func (a *ActorMap) CreateOrMergeActor(actorId string, mergeFn func(*Actor)) {
 
 func GetActorFieldValue(actor Actor, filterKey string) string {
 	switch filterKey {
-	case "actor_id":
+	case "actor_id", "actorId":
 		return actor.ActorID
-	case "job_id":
+	case "job_id", "jobId":
 		return actor.JobID
 	case "state":
 		return string(actor.State)
 	case "name", "actor_name":
 		return actor.Name
-	case "class_name", "actor_class":
+	case "class_name", "actor_class", "className":
 		return actor.ActorClass
-	case "node_id":
+	case "node_id", "nodeId":
 		return actor.Address.NodeID
 	case "pid":
 		return strconv.Itoa(actor.PID)
-	case "placement_group_id":
+	case "placement_group_id", "placementGroupId":
 		return actor.PlacementGroupID
 	default:
 		return ""

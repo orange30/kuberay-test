@@ -46,9 +46,9 @@ type Task struct {
 	Name              string `json:"taskName"`
 	AttemptNumber     int    `json:"taskAttempt"`
 	State             TaskStatus
-	JobID             string `json:"jobId"`
-	NodeID            string `json:"nodeId"`
-	ActorID           string
+	JobID             string             `json:"jobId"`
+	NodeID            string             `json:"nodeId"`
+	ActorID           string             `json:"actorId"`
 	PlacementGroupID  string             `json:"placementGroupId"`
 	Type              TaskType           `json:"taskType"`
 	FuncOrClassName   string             `json:"functionName"`

@@ -2,6 +2,7 @@ package eventserver
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +27,49 @@ type EventHandler struct {
 }
 
 var eventFilePattern = regexp.MustCompile(`-\d{4}-\d{2}-\d{2}-\d{2}$`)
+
+func isActorTaskStateEvents(events []types.StateEvent) bool {
+	for _, e := range events {
+		switch e.State {
+		case types.PENDING_ACTOR_TASK_ARGS_FETCH, types.PENDING_ACTOR_TASK_ORDERING_OR_CONCURRENCY:
+			return true
+		}
+	}
+	return false
+}
+
+// deriveActorIDFromTaskID best-effort derives ActorID bytes from a TaskID.
+// Ray TaskID is 24 bytes for actor tasks where the first 16 bytes are ActorID.
+// The input taskId is typically base64 without padding; we support both padded and raw variants.
+func deriveActorIDFromTaskID(taskId string) (string, bool) {
+	if taskId == "" {
+		return "", false
+	}
+
+	var decoded []byte
+	var err error
+
+	// Prefer RawStdEncoding because many Ray IDs are emitted without '=' padding.
+	decoded, err = base64.RawStdEncoding.DecodeString(taskId)
+	if err != nil {
+		decoded, err = base64.StdEncoding.DecodeString(taskId)
+		if err != nil {
+			decoded, err = base64.URLEncoding.DecodeString(taskId)
+			if err != nil {
+				decoded, err = base64.RawURLEncoding.DecodeString(taskId)
+				if err != nil {
+					return "", false
+				}
+			}
+		}
+	}
+
+	if len(decoded) < 16 {
+		return "", false
+	}
+	actorBytes := decoded[:16]
+	return base64.StdEncoding.EncodeToString(actorBytes), true
+}
 
 func isValidEventFile(fileName string) bool {
 	// Skip directories
@@ -247,6 +291,7 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 			existingState := t.State
 			existingJobID := t.JobID
 			existingNodeID := t.NodeID
+			existingActorID := t.ActorID
 			existingWorkerID := t.WorkerID
 			existingStartTime := t.StartTime
 			existingEndTime := t.EndTime
@@ -265,6 +310,9 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 			}
 			if t.NodeID == "" {
 				t.NodeID = existingNodeID
+			}
+			if t.ActorID == "" {
+				t.ActorID = existingActorID
 			}
 			if t.WorkerID == "" {
 				t.WorkerID = existingWorkerID
@@ -296,6 +344,7 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 		taskAttempt, _ := lifecycleEvent["taskAttempt"].(float64)
 		transitions, _ := lifecycleEvent["stateTransitions"].([]any)
 		jobId, _ := lifecycleEvent["jobId"].(string)
+		actorId, _ := lifecycleEvent["actorId"].(string)
 
 		nodeId, _ := lifecycleEvent["nodeId"].(string)
 		workerId, _ := lifecycleEvent["workerId"].(string)
@@ -327,6 +376,15 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 
 		if len(stateEvents) == 0 {
 			return nil
+		}
+
+		// Best-effort fallback: derive actorId from taskId for actor tasks when export does not include actorId.
+		derivedActorID := ""
+		isActorTask := isActorTaskStateEvents(stateEvents)
+		if actorId == "" && isActorTask {
+			if d, ok := deriveActorIDFromTaskID(taskId); ok {
+				derivedActorID = d
+			}
 		}
 
 		taskMap := h.ClusterTaskMap.GetOrCreateTaskMap(currentClusterName)
@@ -364,6 +422,15 @@ func (h *EventHandler) storeEvent(eventMap map[string]any) error {
 
 			if jobId != "" {
 				t.JobID = jobId
+			}
+
+			if actorId != "" {
+				t.ActorID = actorId
+			} else if derivedActorID != "" && t.ActorID == "" {
+				t.ActorID = derivedActorID
+			}
+			if isActorTask && t.Type == "" {
+				t.Type = types.ACTOR_TASK
 			}
 
 			if nodeId != "" {

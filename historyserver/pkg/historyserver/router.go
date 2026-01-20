@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"strconv"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1381,6 +1381,10 @@ func (s *ServerHandler) getLogicalActors(req *restful.Request, resp *restful.Res
 		clusterNameID = clusterNameID + "_" + sessionName
 	}
 
+	includeDebug := req.QueryParameter("debug") == "1" || strings.EqualFold(req.QueryParameter("debug"), "true")
+	fallbackUsed := false
+	debugInfo := map[string]any{}
+
 	if sessionName == "live" {
 		s.redirectRequest(req, resp)
 		return
@@ -1390,14 +1394,88 @@ func (s *ServerHandler) getLogicalActors(req *restful.Request, resp *restful.Res
 	filterValue := req.QueryParameter("filter_values")
 	filterPredicate := req.QueryParameter("filter_predicates")
 
-	// If filtering by ID fields, convert hex ID to Base64 to match internal storage
+	// If filtering by ID fields, convert hex ID to Base64 to match internal storage.
+	// Accept both live Ray Dashboard camelCase keys and older snake_case keys.
 	if filterValue != "" && (filterKey == "actor_id" || filterKey == "job_id" ||
-		filterKey == "node_id" || filterKey == "worker_id" || filterKey == "placement_group_id") {
+		filterKey == "node_id" || filterKey == "worker_id" || filterKey == "placement_group_id" ||
+		filterKey == "actorId" || filterKey == "jobId" || filterKey == "nodeId" ||
+		filterKey == "workerId" || filterKey == "placementGroupId") {
 		filterValue = hexToBase64(filterValue)
 	}
 
 	// Get actors from EventHandler's in-memory map
 	actorsMap := s.eventHandler.GetActorsMap(clusterNameID)
+	if len(actorsMap) == 0 {
+		fallbackUsed = true
+		// Best-effort fallback: infer actors from tasks when ACTOR_* events are missing.
+		// This mirrors the task-side strategy of degrading gracefully when event types are absent.
+		tasks := s.eventHandler.GetTasks(clusterNameID)
+		totalTasks := len(tasks)
+		actorTasks := 0
+		tasksWithActorID := 0
+		inferred := make(map[string]eventtypes.Actor)
+		for _, task := range tasks {
+			if task.Type == eventtypes.ACTOR_TASK {
+				actorTasks++
+			}
+			if task.ActorID == "" {
+				continue
+			}
+			tasksWithActorID++
+			actor, exists := inferred[task.ActorID]
+			if !exists {
+				actor = eventtypes.Actor{
+					ActorID: task.ActorID,
+					JobID:   task.JobID,
+					State:   eventtypes.ALIVE,
+					Address: eventtypes.Address{
+						NodeID:   task.NodeID,
+						WorkerID: task.WorkerID,
+					},
+				}
+			}
+			// Fill missing info if later tasks provide it.
+			if actor.JobID == "" {
+				actor.JobID = task.JobID
+			}
+			if actor.Address.NodeID == "" {
+				actor.Address.NodeID = task.NodeID
+			}
+			if actor.Address.WorkerID == "" {
+				actor.Address.WorkerID = task.WorkerID
+			}
+			inferred[task.ActorID] = actor
+		}
+		for id, actor := range inferred {
+			actorsMap[id] = actor
+		}
+
+		inferredActors := len(inferred)
+		logrus.WithFields(logrus.Fields{
+			"cluster":           clusterName,
+			"namespace":         clusterNamespace,
+			"session":           sessionName,
+			"clusterNameID":     clusterNameID,
+			"tasksTotal":        totalTasks,
+			"actorTasks":        actorTasks,
+			"tasksWithActorID":  tasksWithActorID,
+			"inferredActors":    inferredActors,
+			"filter_keys":       filterKey,
+			"filter_values":     filterValue,
+			"filter_predicates": filterPredicate,
+		}).Info("/logical/actors: actors map empty; inferred actors from tasks")
+
+		if includeDebug {
+			debugInfo["fallback_used"] = true
+			debugInfo["tasks_total"] = totalTasks
+			debugInfo["actor_tasks"] = actorTasks
+			debugInfo["tasks_with_actor_id"] = tasksWithActorID
+			debugInfo["inferred_actors"] = inferredActors
+			if tasksWithActorID == 0 {
+				debugInfo["note"] = "no tasks with actorId; likely exporter omits actorId and/or actor events"
+			}
+		}
+	}
 
 	// Convert map to slice for filtering
 	actors := make([]eventtypes.Actor, 0, len(actorsMap))
@@ -1424,14 +1502,16 @@ func (s *ServerHandler) getLogicalActors(req *restful.Request, resp *restful.Res
 			"actors": formattedActors,
 		},
 	}
-
-	respData, err := json.Marshal(response)
-	if err != nil {
-		logrus.Errorf("Failed to marshal actors response: %v", err)
-		resp.WriteErrorString(http.StatusInternalServerError, err.Error())
-		return
+	if includeDebug {
+		if _, ok := response["data"].(map[string]interface{}); ok {
+			response["data"].(map[string]interface{})["debug"] = map[string]any{
+				"fallback_used": fallbackUsed,
+				"details":       debugInfo,
+			}
+		}
 	}
-	resp.Write(respData)
+
+	resp.WriteAsJson(response)
 }
 
 // formatActorForResponse converts an eventtypes.Actor to the format expected by Ray Dashboard
@@ -1443,37 +1523,68 @@ func formatActorForResponse(actor eventtypes.Actor) map[string]interface{} {
 	jobIDHex := base64ToHex(actor.JobID)
 	pgIDHex := base64ToHex(actor.PlacementGroupID)
 
-	result := map[string]interface{}{
-		"actor_id":           actorIDHex,
-		"job_id":             jobIDHex,
-		"placement_group_id": pgIDHex,
-		"state":              string(actor.State),
-		"pid":                actor.PID,
-		"address": map[string]interface{}{
-			"node_id":    nodeIDHex,
-			"ip_address": actor.Address.IPAddress,
-			"port":       actor.Address.Port,
-			"worker_id":  workerIDHex,
-		},
-		"name":               actor.Name,
-		"num_restarts":       actor.NumRestarts,
-		"actor_class":        actor.ActorClass,
-		"required_resources": actor.RequiredResources,
-		"exit_details":       actor.ExitDetails,
-		"repr_name":          actor.ReprName,
-		"call_site":          actor.CallSite,
-		"is_detached":        actor.IsDetached,
-		"ray_namespace":      actor.RayNamespace,
+	// Ray Dashboard's /logical/actors uses camelCase field names.
+	// Some fields are strings in Ray responses (e.g. numRestarts), so keep compatibility.
+	portValue := any(actor.Address.Port)
+	if actor.Address.Port != "" {
+		if n, err := strconv.Atoi(actor.Address.Port); err == nil {
+			portValue = n
+		}
 	}
 
-	// Only include start_time if it's set (non-zero)
-	if !actor.StartTime.IsZero() {
-		result["start_time"] = actor.StartTime.UnixMilli()
-	}
-
-	// Only include end_time if it's set (non-zero)
+	// "timestamp" in Ray is typically the latest state timestamp in ms.
+	// Best-effort: use EndTime (DEAD) else StartTime (ALIVE) else 0.
+	var timestampMs float64
 	if !actor.EndTime.IsZero() {
-		result["end_time"] = actor.EndTime.UnixMilli()
+		timestampMs = float64(actor.EndTime.UnixMilli())
+	} else if !actor.StartTime.IsZero() {
+		timestampMs = float64(actor.StartTime.UnixMilli())
+	}
+
+	exitDetail := actor.ExitDetails
+	if exitDetail == "" {
+		exitDetail = "-"
+	}
+
+	result := map[string]interface{}{
+		"actorId":          actorIDHex,
+		"jobId":            jobIDHex,
+		"placementGroupId": pgIDHex,
+		"state":            string(actor.State),
+		"pid":              actor.PID,
+		"address": map[string]interface{}{
+			"nodeId":    nodeIDHex,
+			"ipAddress": actor.Address.IPAddress,
+			"port":      portValue,
+			"workerId":  workerIDHex,
+		},
+		"name":              actor.Name,
+		"className":         actor.ActorClass,
+		"numRestarts":       strconv.Itoa(actor.NumRestarts),
+		"timestamp":         timestampMs,
+		"startTime":         0,
+		"endTime":           0,
+		"reprName":          actor.ReprName,
+		"labelSelector":     actor.LabelSelector,
+		"actorClass":        actor.ActorClass,
+		"exitDetail":        exitDetail,
+		"requiredResources": actor.RequiredResources,
+		"gpus":              []any{},
+		"processStats":      nil,
+		"mem":               []any{},
+		"callSite":          actor.CallSite,
+		"isDetached":        actor.IsDetached,
+		"rayNamespace":      actor.RayNamespace,
+	}
+
+	// Only include startTime if it's set (non-zero)
+	if !actor.StartTime.IsZero() {
+		result["startTime"] = actor.StartTime.UnixMilli()
+	}
+
+	// Only include endTime if it's set (non-zero)
+	if !actor.EndTime.IsZero() {
+		result["endTime"] = actor.EndTime.UnixMilli()
 	}
 
 	return result
@@ -1481,17 +1592,66 @@ func formatActorForResponse(actor eventtypes.Actor) map[string]interface{} {
 func (s *ServerHandler) getLogicalActor(req *restful.Request, resp *restful.Response) {
 	clusterName := req.Attribute(COOKIE_CLUSTER_NAME_KEY).(string)
 	clusterNamespace := req.Attribute(COOKIE_CLUSTER_NAMESPACE_KEY).(string)
-	clusterNameID := clusterName + "_" + clusterNamespace
 	sessionName := req.Attribute(COOKIE_SESSION_NAME_KEY).(string)
 	if sessionName == "live" {
 		s.redirectRequest(req, resp)
 		return
 	}
 
-	actorID := req.PathParameter("single_actor")
+	clusterKey := clusterName + "_" + clusterNamespace
+	if sessionName != "" {
+		clusterKey = clusterKey + "_" + sessionName
+	}
 
-	// Get actor from EventHandler's in-memory map
-	actor, found := s.eventHandler.GetActorByID(clusterNameID, actorID)
+	actorIDParam := req.PathParameter("single_actor")
+	actorIDBase64 := actorIDParam
+	// Ray Dashboard uses hex IDs in the URL; internal storage uses base64.
+	// hexToBase64 returns the original string if it's not valid hex.
+	converted := hexToBase64(actorIDParam)
+	if converted != actorIDParam {
+		actorIDBase64 = converted
+	}
+
+	// 1) Fast path: find in actor map
+	actor, found := s.eventHandler.GetActorByID(clusterKey, actorIDBase64)
+	if !found && actorIDBase64 != actorIDParam {
+		// Backward compatibility: if caller passed base64 but also looks like hex decoding failed.
+		actor, found = s.eventHandler.GetActorByID(clusterKey, actorIDParam)
+	}
+
+	// 2) Fallback: infer from tasks when ACTOR_* events are missing
+	if !found {
+		tasks := s.eventHandler.GetTasks(clusterKey)
+		for _, task := range tasks {
+			if task.ActorID == "" {
+				continue
+			}
+			if task.ActorID != actorIDBase64 {
+				continue
+			}
+			actor = eventtypes.Actor{
+				ActorID: task.ActorID,
+				JobID:   task.JobID,
+				State:   eventtypes.ALIVE,
+				Address: eventtypes.Address{
+					NodeID:   task.NodeID,
+					WorkerID: task.WorkerID,
+				},
+			}
+			found = true
+			break
+		}
+		if found {
+			logrus.WithFields(logrus.Fields{
+				"cluster":       clusterName,
+				"namespace":     clusterNamespace,
+				"session":       sessionName,
+				"clusterKey":    clusterKey,
+				"actorIdHex":    actorIDParam,
+				"actorIdBase64": actorIDBase64,
+			}).Info("/logical/actors/{id}: actor not in map; inferred from tasks")
+		}
+	}
 
 	replyActorInfo := ReplyActorInfo{
 		Data: ActorInfoData{},
@@ -1506,14 +1666,7 @@ func (s *ServerHandler) getLogicalActor(req *restful.Request, resp *restful.Resp
 		replyActorInfo.Msg = "Actor not found."
 	}
 
-	actData, err := json.MarshalIndent(&replyActorInfo, "", "  ")
-	if err != nil {
-		logrus.Errorf("Failed to marshal actor response: %v", err)
-		resp.WriteErrorString(http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	resp.Write(actData)
+	resp.WriteAsJson(replyActorInfo)
 }
 
 func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Response) {
@@ -1527,6 +1680,7 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 	clusterNamespace := req.Attribute(COOKIE_CLUSTER_NAMESPACE_KEY).(string)
 	nodeID := req.QueryParameter("node_id")
 	taskID := req.QueryParameter("task_id")
+	actorID := req.QueryParameter("actor_id")
 	filename := req.QueryParameter("filename")
 	suffix := req.QueryParameter("suffix") // "out" or "err"
 	linesStr := req.QueryParameter("lines")
@@ -1591,21 +1745,22 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 		allFiles := s.reader.ListFiles(clusterNameID+"_"+clusterNamespace, logDir)
 
 		// Search for files matching: worker-<worker_id>-<job_id>-*.<suffix>
-		var matchedFile string
 		searchPrefix := fmt.Sprintf("worker-%s-%s-", workerIDHex, jobIDHex)
 		searchSuffix := "." + suffix
 
-		for _, filename := range allFiles {
-			if strings.HasPrefix(filename, searchPrefix) && strings.HasSuffix(filename, searchSuffix) {
-				matchedFile = filename
-				logrus.Infof("Found matching log file: %s", filename)
-				break
-			}
+		matchedFile, matchStrategy := findWorkerLogFile(allFiles, workerIDHex, jobIDHex, suffix)
+		if matchedFile != "" {
+			logrus.WithFields(logrus.Fields{"match": matchStrategy}).Infof("Found matching log file: %s", matchedFile)
 		}
 
 		if matchedFile == "" {
 			logrus.Warnf("No worker log file found in %s with pattern %s*%s", logDir, searchPrefix, searchSuffix)
 			logrus.Infof("Available files in directory: %v", allFiles)
+
+			sample := allFiles
+			if len(sample) > 10 {
+				sample = sample[:10]
+			}
 
 			errorMsg := fmt.Sprintf(
 				"Task log file not found.\n\n"+
@@ -1616,8 +1771,9 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 					"  - Node ID: %s\n"+
 					"  - Worker ID: %s\n"+
 					"  - Job ID: %s\n\n"+
-					"Found %d files in log directory.",
-				logDir, searchPrefix, searchSuffix, taskID, nodeIDHex, workerIDHex, jobIDHex, len(allFiles))
+					"Found %d files in log directory.\n"+
+					"Sample files: %v\n",
+				logDir, searchPrefix, searchSuffix, taskID, nodeIDHex, workerIDHex, jobIDHex, len(allFiles), sample)
 			resp.WriteErrorString(http.StatusNotFound, errorMsg)
 			return
 		}
@@ -1644,6 +1800,121 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 
 		// If we still can't get the file (shouldn't happen)
 		resp.WriteErrorString(http.StatusInternalServerError, "Failed to retrieve log file content")
+		return
+
+	} else if actorID != "" {
+		// Actor log: resolve actor_id (hex in UI) -> base64 internal, then locate worker log under the actor's node.
+		clusterKey := clusterNameID + "_" + clusterNamespace
+		if sessionName != "" {
+			clusterKey = clusterKey + "_" + sessionName
+		}
+
+		if suffix == "" {
+			suffix = "out"
+		}
+
+		actorIDBase64 := actorID
+		converted := hexToBase64(actorID)
+		if converted != actorID {
+			actorIDBase64 = converted
+		}
+
+		actor, found := s.eventHandler.GetActorByID(clusterKey, actorIDBase64)
+		if !found && actorIDBase64 != actorID {
+			// Accept callers that pass base64 directly.
+			actor, found = s.eventHandler.GetActorByID(clusterKey, actorID)
+		}
+
+		if !found {
+			// Fallback: infer minimal actor location from tasks.
+			tasks := s.eventHandler.GetTasks(clusterKey)
+			for _, task := range tasks {
+				if task.ActorID == "" {
+					continue
+				}
+				if task.ActorID != actorIDBase64 {
+					continue
+				}
+				actor = eventtypes.Actor{
+					ActorID: task.ActorID,
+					JobID:   task.JobID,
+					State:   eventtypes.ALIVE,
+					Address: eventtypes.Address{
+						NodeID:   task.NodeID,
+						WorkerID: task.WorkerID,
+					},
+				}
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			resp.WriteErrorString(http.StatusNotFound, "Actor not found")
+			return
+		}
+
+		// Convert IDs to hex format for object storage paths.
+		nodeIDHex := base64ToHex(actor.Address.NodeID)
+		workerIDHex := base64ToHex(actor.Address.WorkerID)
+		jobIDHex := base64ToHex(actor.JobID)
+
+		if nodeIDHex == "" {
+			resp.WriteErrorString(http.StatusNotFound, "Actor has no associated node, cannot locate logs")
+			return
+		}
+		if workerIDHex == "" || jobIDHex == "" {
+			resp.WriteErrorString(http.StatusNotFound, "Actor has incomplete address/job info, cannot locate logs")
+			return
+		}
+
+		logDir := path.Join(sessionName, "logs", nodeIDHex)
+		allFiles := s.reader.ListFiles(clusterNameID+"_"+clusterNamespace, logDir)
+		searchPrefix := fmt.Sprintf("worker-%s-%s-", workerIDHex, jobIDHex)
+		searchSuffix := "." + suffix
+
+		matchedFile, matchStrategy := findWorkerLogFile(allFiles, workerIDHex, jobIDHex, suffix)
+		if matchedFile != "" {
+			logrus.WithFields(logrus.Fields{"match": matchStrategy}).Infof("Found matching log file: %s", matchedFile)
+		}
+
+		if matchedFile == "" {
+			sample := allFiles
+			if len(sample) > 10 {
+				sample = sample[:10]
+			}
+
+			errorMsg := fmt.Sprintf(
+				"Actor log file not found.\n\n"+
+					"Searched in: %s\n"+
+					"Pattern: %s*%s\n"+
+					"Actor info:\n"+
+					"  - Actor ID: %s\n"+
+					"  - Node ID: %s\n"+
+					"  - Worker ID: %s\n"+
+					"  - Job ID: %s\n\n"+
+					"Found %d files in log directory.\n"+
+					"Sample files: %v\n",
+				logDir, searchPrefix, searchSuffix, actorID, nodeIDHex, workerIDHex, jobIDHex, len(allFiles), sample)
+			resp.WriteErrorString(http.StatusNotFound, errorMsg)
+			return
+		}
+
+		filePath = path.Join(logDir, matchedFile)
+		reader := s.reader.GetContent(clusterNameID+"_"+clusterNamespace, filePath)
+		if reader == nil {
+			resp.WriteErrorString(http.StatusInternalServerError, "Failed to retrieve log file content")
+			return
+		}
+
+		resp.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		data, err := readTailLines(reader, lines)
+		if err != nil {
+			logrus.Errorf("Failed to write log file content: %v", err)
+			resp.WriteErrorString(http.StatusInternalServerError, "Failed to read log file")
+			return
+		}
+		_, _ = resp.Write(data)
 		return
 
 	} else if nodeID != "" && filename != "" {
@@ -1682,7 +1953,7 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 		}
 		_, _ = resp.Write(data)
 	} else {
-		resp.WriteErrorString(http.StatusBadRequest, "Either node_id+filename or task_id is required")
+		resp.WriteErrorString(http.StatusBadRequest, "Either node_id+filename or task_id or actor_id is required")
 		return
 	}
 }
@@ -1740,6 +2011,83 @@ func (s *ServerHandler) getTaskSummarize(req *restful.Request, resp *restful.Res
 		return
 	}
 	resp.Write(respData)
+}
+
+func findWorkerLogFile(allFiles []string, workerIDHex, jobIDHex, suffix string) (string, string) {
+	if len(allFiles) == 0 {
+		return "", ""
+	}
+
+	needleSuffix := "." + suffix
+	if suffix == "" {
+		needleSuffix = ""
+	}
+
+	unique := func(in []string) []string {
+		seen := make(map[string]struct{}, len(in))
+		out := make([]string, 0, len(in))
+		for _, v := range in {
+			if v == "" {
+				continue
+			}
+			if _, ok := seen[v]; ok {
+				continue
+			}
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+		return out
+	}
+
+	workerCandidates := []string{workerIDHex}
+	// Some Ray versions/log layouts use shorter worker id segments in filenames.
+	if len(workerIDHex) > 32 {
+		workerCandidates = append(workerCandidates, workerIDHex[:32], workerIDHex[len(workerIDHex)-32:])
+	}
+	workerCandidates = unique(workerCandidates)
+
+	// 1) Exact prefix match: worker-<worker>-<job>-*.suffix
+	for _, w := range workerCandidates {
+		prefix := fmt.Sprintf("worker-%s-%s-", w, jobIDHex)
+		for _, f := range allFiles {
+			if strings.HasPrefix(f, prefix) && (needleSuffix == "" || strings.HasSuffix(f, needleSuffix)) {
+				return f, "prefix(worker,job)"
+			}
+		}
+	}
+
+	// 2) Contains match for worker+job, in case directory listing includes nested paths or prefixes.
+	for _, w := range workerCandidates {
+		workerTok := "worker-" + w + "-"
+		jobTok := "-" + jobIDHex + "-"
+		for _, f := range allFiles {
+			if strings.Contains(f, workerTok) && strings.Contains(f, jobTok) && (needleSuffix == "" || strings.HasSuffix(f, needleSuffix)) {
+				return f, "contains(worker,job)"
+			}
+		}
+	}
+
+	// 3) Prefix match on worker only (ignore job id). Better than returning nothing.
+	for _, w := range workerCandidates {
+		prefix := "worker-" + w + "-"
+		for _, f := range allFiles {
+			if strings.HasPrefix(f, prefix) && (needleSuffix == "" || strings.HasSuffix(f, needleSuffix)) {
+				return f, "prefix(worker)"
+			}
+		}
+	}
+
+	// 4) Contains match on worker only.
+	for _, w := range workerCandidates {
+		workerTok := "worker-" + w + "-"
+		for _, f := range allFiles {
+			if strings.Contains(f, workerTok) && (needleSuffix == "" || strings.HasSuffix(f, needleSuffix)) {
+				return f, "contains(worker)"
+			}
+		}
+	}
+
+	return "", ""
 }
 
 // summarizeTasksByFuncName groups tasks by function name and counts by state
