@@ -85,6 +85,12 @@ func (s *ServerHandler) GetNodes(rayClusterNameID, sessionId string) ([]byte, er
 }
 
 func (h *ServerHandler) getGrafanaHealth(req *restful.Request, resp *restful.Response) {
+	sessionNameAttr := req.Attribute(COOKIE_SESSION_NAME_KEY)
+	if sessionName, ok := sessionNameAttr.(string); ok && sessionName == "live" {
+		h.redirectRequest(req, resp)
+		return
+	}
+
 	grafanaHost := h.rayGrafanaIframeHost
 	if grafanaHost == "" {
 		grafanaHost = h.rayGrafanaHost

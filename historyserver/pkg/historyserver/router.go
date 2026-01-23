@@ -125,6 +125,7 @@ func routerAPI(s *ServerHandler) {
 	ws.Route(ws.GET("/v0/logs/file").To(s.getNodeLogFile).Filter(s.CookieHandle).
 		Doc("get logfile").Param(ws.QueryParameter("node_id", "node_id")).
 		Param(ws.QueryParameter("task_id", "task_id")).
+		Param(ws.QueryParameter("submission_id", "submission_id")).
 		Param(ws.QueryParameter("filename", "filename")).
 		Param(ws.QueryParameter("suffix", "suffix")).
 		Param(ws.QueryParameter("lines", "lines")).
@@ -919,6 +920,18 @@ func (s *ServerHandler) getJob(req *restful.Request, resp *restful.Response) {
 		job, found = s.eventHandler.GetJobByID(clusterKey, jobID)
 	}
 
+	// If still not found, treat jobID as submission_id (like live Ray Dashboard does)
+	if !found {
+		allJobs := s.eventHandler.GetJobs(clusterKey)
+		for _, j := range allJobs {
+			if j.SubmissionID == jobID {
+				job = j
+				found = true
+				break
+			}
+		}
+	}
+
 	if !found {
 		resp.WriteErrorString(http.StatusNotFound, "Job not found")
 		return
@@ -1681,6 +1694,7 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 	nodeID := req.QueryParameter("node_id")
 	taskID := req.QueryParameter("task_id")
 	actorID := req.QueryParameter("actor_id")
+	submissionID := req.QueryParameter("submission_id")
 	filename := req.QueryParameter("filename")
 	suffix := req.QueryParameter("suffix") // "out" or "err"
 	linesStr := req.QueryParameter("lines")
@@ -1917,6 +1931,91 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 		_, _ = resp.Write(data)
 		return
 
+	} else if submissionID != "" {
+		// Job driver log: allow callers to pass only submission_id.
+		// We best-effort resolve the node directory and stream job-driver-<submission_id>.log.
+		clusterKey := clusterNameID + "_" + clusterNamespace
+		if sessionName != "" {
+			clusterKey = clusterKey + "_" + sessionName
+		}
+
+		candidateFilenames := []string{
+			"job-driver-" + submissionID + ".log",
+			".job-driver-" + submissionID + ".log",
+		}
+
+		nodeHex := ""
+		// Prefer resolving from Job map if available.
+		jobs := s.eventHandler.GetJobs(clusterKey)
+		for _, j := range jobs {
+			if j.SubmissionID == submissionID && j.DriverNodeID != "" {
+				nodeHex = base64ToHex(j.DriverNodeID)
+				break
+			}
+		}
+
+		// Fallback: scan logs directories for the driver log file.
+		if nodeHex == "" {
+			logsPrefix := sessionName + "/logs/"
+			nodeDirList := s.reader.ListFiles(clusterNameID+"_"+clusterNamespace, logsPrefix)
+			for _, nodeDir := range nodeDirList {
+				nodeHexCandidate := strings.TrimSuffix(strings.TrimSpace(nodeDir), "/")
+				if nodeHexCandidate == "" || nodeHexCandidate == "." {
+					continue
+				}
+				files := s.reader.ListFiles(clusterNameID+"_"+clusterNamespace, sessionName+"/logs/"+nodeHexCandidate)
+				if len(files) == 0 {
+					files = s.reader.ListFiles(clusterNameID+"_"+clusterNamespace, sessionName+"/logs/"+nodeHexCandidate+"/")
+				}
+				if len(files) == 0 {
+					continue
+				}
+				for _, f := range files {
+					for _, cand := range candidateFilenames {
+						if f == cand {
+							nodeHex = nodeHexCandidate
+							break
+						}
+					}
+					if nodeHex != "" {
+						break
+					}
+				}
+				if nodeHex != "" {
+					break
+				}
+			}
+		}
+
+		if nodeHex == "" {
+			resp.WriteErrorString(http.StatusNotFound, "Unable to locate job driver log for submission_id")
+			return
+		}
+
+		// Try non-hidden then hidden filename.
+		picked := "job-driver-" + submissionID + ".log"
+		filePath = path.Join(sessionName, "logs", nodeHex, picked)
+		reader := s.reader.GetContent(clusterNameID+"_"+clusterNamespace, filePath)
+		if reader == nil {
+			picked = ".job-driver-" + submissionID + ".log"
+			filePath = path.Join(sessionName, "logs", nodeHex, picked)
+			reader = s.reader.GetContent(clusterNameID+"_"+clusterNamespace, filePath)
+		}
+		if reader == nil {
+			resp.WriteErrorString(http.StatusNotFound, fmt.Sprintf("Log file not found: %s", filePath))
+			return
+		}
+
+		resp.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		data, err := readTailLines(reader, lines)
+		if err != nil {
+			logrus.Errorf("Failed to write log file content: %v", err)
+			resp.WriteErrorString(http.StatusInternalServerError, "Failed to read log file")
+			return
+		}
+		_, _ = resp.Write(data)
+		return
+
 	} else if nodeID != "" && filename != "" {
 		// Node log: original behavior
 		filePath = path.Join(sessionName, "logs", nodeID, filename)
@@ -1953,7 +2052,7 @@ func (s *ServerHandler) getNodeLogFile(req *restful.Request, resp *restful.Respo
 		}
 		_, _ = resp.Write(data)
 	} else {
-		resp.WriteErrorString(http.StatusBadRequest, "Either node_id+filename or task_id or actor_id is required")
+		resp.WriteErrorString(http.StatusBadRequest, "Either node_id+filename or task_id or actor_id or submission_id is required")
 		return
 	}
 }
