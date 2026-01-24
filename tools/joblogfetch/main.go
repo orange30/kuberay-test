@@ -29,6 +29,8 @@ const (
 	probeTimeout = 3 * time.Second
 )
 
+// ./joblogfetch -cluster raycluster-3 -session session_2026-01-22_22-40-55_855005_1 -namespace default -submission-id ray-data-metrics-demo-z4wnr
+
 type clusterInfo struct {
 	Name            string `json:"name"`
 	Namespace       string `json:"namespace"`
@@ -38,8 +40,23 @@ type clusterInfo struct {
 
 func main() {
 	// 支持命令行参数
-	specifiedSession := flag.String("session", "", "指定 historyserver session_name（可选，默认自动选最新）")
+	argSession := flag.String("session", "", "指定 historyserver session_name（可选，默认自动选最新）")
+	argCluster := flag.String("cluster", "", "Ray Cluster Name (Required)")
+	argNamespace := flag.String("namespace", "default", "Ray Cluster Namespace")
+	argSubmissionID := flag.String("submission-id", "", "Job Submission ID (Required)")
+
 	flag.Parse()
+
+	// 检查必填参数
+	if *argCluster == "" || *argSubmissionID == "" {
+		fmt.Fprintf(os.Stderr, "Usage: %s -cluster <name> -submission-id <id> [-namespace <ns>] [-session <session>]\n", os.Args[0])
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
+	submissionID := *argSubmissionID
+	clusterName := *argCluster
+	clusterNamespace := *argNamespace
 
 	fmt.Fprintf(os.Stderr, "[INFO] joblogfetch starting...\n")
 	fmt.Fprintf(os.Stderr, "[INFO] submission_id=%s\n", submissionID)
@@ -47,31 +64,40 @@ func main() {
 	fmt.Fprintf(os.Stderr, "[INFO] history_url=%s\n", historyServer)
 
 	ctx := context.Background()
+	var baseURL, cookieHeader, nodeID string
+	var err error
+	foundInLive := false
 
-	// 1. ms 级探活：优先尝试 live Ray Dashboard
+	// 1. 尝试从 Live Ray Dashboard 获取
 	fmt.Fprintf(os.Stderr, "[STEP 1] Probing live Ray Dashboard (timeout=%v)...\n", probeTimeout)
-	useLive := false
 	if probeLive(ctx, liveRayDashboard, probeTimeout) {
 		fmt.Fprintf(os.Stderr, "[SUCCESS] ✓ Live Ray Dashboard is available (%s)\n", liveRayDashboard)
-		useLive = true
+
+		fmt.Fprintf(os.Stderr, "[STEP 1.1] Try fetching driver_node_id from Live Dashboard...\n")
+		// 尝试直接获取 Job 信息，如果 404 说明 Job 可能已经结束并归档了
+		nodeID, err = getDriverNodeID(ctx, liveRayDashboard, "", submissionID)
+		if err == nil {
+			fmt.Fprintf(os.Stderr, "[SUCCESS] Found job in Live Dashboard, driver_node_id=%s\n", nodeID)
+			baseURL = liveRayDashboard
+			cookieHeader = ""
+			foundInLive = true
+		} else {
+			fmt.Fprintf(os.Stderr, "[WARNING] Failed to find job in Live Dashboard: %v. Will try HistoryServer.\n", err)
+		}
 	} else {
-		fmt.Fprintf(os.Stderr, "[WARNING] ✗ Live Ray Dashboard unavailable, fallback to HistoryServer (%s)\n", historyServer)
+		fmt.Fprintf(os.Stderr, "[WARNING] ✗ Live Ray Dashboard unavailable, skipping.\n")
 	}
 
-	var baseURL, cookieHeader string
-	if useLive {
-		fmt.Fprintf(os.Stderr, "[BRANCH] Using live Ray Dashboard\n")
-		baseURL = liveRayDashboard
-		cookieHeader = ""
-	} else {
-		fmt.Fprintf(os.Stderr, "[BRANCH] Using HistoryServer\n")
+	// 2. 如果 Live 没找到，尝试 HistoryServer
+	if !foundInLive {
+		fmt.Fprintf(os.Stderr, "[BRANCH] Using HistoryServer fallback\n")
 		baseURL = historyServer
-		// 2. 通过 /clusters/ 获取 session_name（或使用指定的）
+
+		// 获取 Session Name
 		var sessionName string
-		var err error
-		if *specifiedSession != "" {
-			fmt.Fprintf(os.Stderr, "[STEP 2] Using manually specified session_name=%s\n", *specifiedSession)
-			sessionName = *specifiedSession
+		if *argSession != "" {
+			fmt.Fprintf(os.Stderr, "[STEP 2] Using manually specified session_name=%s\n", *argSession)
+			sessionName = *argSession
 		} else {
 			fmt.Fprintf(os.Stderr, "[STEP 2] Auto-fetching latest session from %s...\n", historyServer)
 			sessionName, err = getSessionName(ctx, historyServer, clusterName, clusterNamespace)
@@ -80,22 +106,23 @@ func main() {
 			}
 			fmt.Fprintf(os.Stderr, "[SUCCESS] Got latest session_name=%s\n", sessionName)
 		}
+
 		cookieHeader = fmt.Sprintf("cluster_name=%s; cluster_namespace=%s; session_name=%s",
 			clusterName, clusterNamespace, sessionName)
 		fmt.Fprintf(os.Stderr, "[INFO] Cookie header set: %s\n", cookieHeader)
-	}
 
-	// 3. 通过 /api/jobs/{submission_id} 获取 driver_node_id
-	fmt.Fprintf(os.Stderr, "[STEP 3] Fetching driver_node_id for submission_id=%s...\n", submissionID)
-	nodeID, err := getDriverNodeID(ctx, baseURL, cookieHeader, submissionID)
-	if err != nil {
-		fatalf("[ERROR] get driver_node_id failed: %v", err)
+		// 获取 Node ID
+		fmt.Fprintf(os.Stderr, "[STEP 3] Fetching driver_node_id from HistoryServer for submission_id=%s...\n", submissionID)
+		nodeID, err = getDriverNodeID(ctx, baseURL, cookieHeader, submissionID)
+		if err != nil {
+			fatalf("[ERROR] get driver_node_id failed from HistoryServer: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "[SUCCESS] driver_node_id=%s\n", nodeID)
 	}
-	fmt.Fprintf(os.Stderr, "[SUCCESS] driver_node_id=%s\n", nodeID)
 
 	// 4. 拉取日志：/api/v0/logs/file
 	filename := fmt.Sprintf("job-driver-%s.log", submissionID)
-	fmt.Fprintf(os.Stderr, "[STEP 4] Fetching log: filename=%s, lines=%d\n", filename, maxLines)
+	fmt.Fprintf(os.Stderr, "[STEP 4] Fetching log: filename=%s, lines=%d from %s\n", filename, maxLines, baseURL)
 	if err := fetchLogFile(ctx, baseURL, cookieHeader, nodeID, filename, maxLines); err != nil {
 		fatalf("[ERROR] fetch log failed: %v", err)
 	}

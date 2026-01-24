@@ -33,4 +33,3 @@ var readerRegistry = ReaderRegistry{
 	"s3":        s3.NewReader,
 	"cos":       cos.NewReader,
 }
-
