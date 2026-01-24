@@ -4,6 +4,7 @@ import (
 	"github.com/ray-project/kuberay/historyserver/pkg/collector/types"
 	"github.com/ray-project/kuberay/historyserver/pkg/storage"
 	"github.com/ray-project/kuberay/historyserver/pkg/storage/aliyunoss/ray"
+	"github.com/ray-project/kuberay/historyserver/pkg/storage/cos"
 	"github.com/ray-project/kuberay/historyserver/pkg/storage/localtest"
 	"github.com/ray-project/kuberay/historyserver/pkg/storage/s3"
 )
@@ -17,6 +18,7 @@ func GetWriterRegistry() WriterRegistry {
 var writerRegistry = WriterRegistry{
 	"aliyunoss": ray.NewWriter,
 	"s3":        s3.NewWriter,
+	"cos":       cos.NewWriter,
 }
 
 type ReaderRegistry map[string]func(globalData *types.RayHistoryServerConfig, data map[string]interface{}) (storage.StorageReader, error)
@@ -29,4 +31,6 @@ var readerRegistry = ReaderRegistry{
 	"aliyunoss": ray.NewReader,
 	"localtest": localtest.NewReader,
 	"s3":        s3.NewReader,
+	"cos":       cos.NewReader,
 }
+
