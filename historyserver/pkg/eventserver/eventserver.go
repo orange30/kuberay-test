@@ -163,7 +163,21 @@ func (h *EventHandler) Run(stop chan struct{}, numOfEventProcessors int) error {
 		// Helper function to process all events
 		processAllEvents := func() {
 			clusterList := h.reader.List()
-			for _, clusterInfo := range clusterList {
+			logrus.Infof("🔍 [EventHandler] Found %d clusters from storage", len(clusterList))
+			
+			if len(clusterList) == 0 {
+				logrus.Warnf("⚠️  [EventHandler] No clusters found! This means:")
+				logrus.Warnf("   1. COS bucket is empty, OR")
+				logrus.Warnf("   2. COS path (--ray-root-dir) is incorrect, OR")
+				logrus.Warnf("   3. COS authentication failed")
+				logrus.Warnf("   💡 Check: --ray-root-dir=mce-proj-bk0lwhh1")
+				return
+			}
+			
+			for idx, clusterInfo := range clusterList {
+				logrus.Infof("📦 [EventHandler] Processing cluster [%d/%d]: Name=%s, Namespace=%s, Session=%s",
+					idx+1, len(clusterList), clusterInfo.Name, clusterInfo.Namespace, clusterInfo.SessionName)
+				
 				clusterNameNamespace := clusterInfo.Name + "_" + clusterInfo.Namespace
 				eventFileList := append(h.getAllJobEventFiles(clusterInfo), h.getAllNodeEventFiles(clusterInfo)...)
 
@@ -214,6 +228,10 @@ func (h *EventHandler) Run(stop chan struct{}, numOfEventProcessors int) error {
 				// Enrich tasks from log files (补齐缺失的 nodeId/workerId)
 				logrus.Debugf("[EventHandler] Enriching tasks from log files for cluster %s", clusterInfo.Name)
 				h.EnrichTasksFromLogs(clusterInfo)
+
+				// Fallback: reconstruct task/actor data from worker-*.out logs if event files are empty
+				logrus.Debugf("[EventHandler] Checking if worker log fallback is needed for cluster %s", clusterInfo.Name)
+				h.FallbackToWorkerLogs(clusterInfo)
 			}
 		}
 

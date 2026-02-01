@@ -12,6 +12,7 @@ require (
 	github.com/onsi/gomega v1.38.2
 	github.com/ray-project/kuberay/ray-operator v1.5.1
 	github.com/sirupsen/logrus v1.9.3
+	github.com/stretchr/testify v1.11.1
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.72
 	k8s.io/apimachinery v0.35.0
 	k8s.io/client-go v0.35.0
@@ -91,7 +92,6 @@ require (
 	github.com/moby/spdystream v0.5.0 // indirect
 	github.com/mozillazg/go-httpheader v0.2.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	golang.org/x/mod v0.29.0 // indirect
 	golang.org/x/tools v0.38.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
