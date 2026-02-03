@@ -1,0 +1,209 @@
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: rayjob-job-xb62dnma
+  namespace: mce-proj-bk0lwhh1
+spec:
+  rayClusterSpec:
+    rayVersion: "2.46.0"
+    headGroupSpec:
+      serviceType: ClusterIP
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+          - name: ray-head
+            image: rayproject/ray:2.46.0
+            env:
+            # ===== 保留原有的环境变量 =====
+            - name: RAY_GRAFANA_IFRAME_HOST
+              value: http://81.69.152.103:5001
+            - name: RAY_GRAFANA_HOST
+              value: http://81.69.152.103:5001
+            - name: RAY_PROMETHEUS_HOST
+              value: http://prometheus-kube-prometheus-prometheus.prometheus-system.svc:9090
+            # ===== 新增：启用 Task Events =====
+            - name: RAY_ENABLE_TASK_EVENTS
+              value: "1"
+            - name: RAY_task_events_report_interval_ms
+              value: "1000"
+            resources:
+              limits:
+                cpu: "1"
+                memory: 2Gi
+              requests:
+                cpu: "1"
+                memory: 2Gi
+            ports:
+            - containerPort: 6379
+              name: gcs-server
+            - containerPort: 8265
+              name: dashboard
+            - containerPort: 8080
+              name: metrics
+            volumeMounts:
+            - mountPath: /tmp/ray
+              name: historyserver
+            lifecycle:
+              postStart:
+                exec:
+                  command:
+                  - /bin/sh
+                  - -lc
+                  - --
+                  - |-
+                    GetNodeId(){
+                      while true; do
+                        nodeid=$(ps -ef | grep raylet | grep node_id | grep -v grep | grep -oP '(?<=--node_id=)[^ ]*')
+                        if [ -n "$nodeid" ]; then
+                          echo "$(date) raylet started: ${nodeid}" >> /tmp/ray/init.log
+                          echo $nodeid > /tmp/ray/raylet_node_id
+                          break
+                        else
+                          sleep 1
+                        fi
+                      done
+                    }
+                    GetNodeId
+          - name: collector
+            image: ccr.ccs.tencentyun.com/use-test/ray:collector-m010
+            imagePullPolicy: IfNotPresent
+            command:
+            - collector
+            - --role=Head
+            - --runtime-class-name=cos
+            - --ray-cluster-name=$(RAY_CLUSTER_NAME)
+            - --ray-root-dir=mce-proj-bk0lwhh1
+            - --ray-cluster-id=mce-proj-bk0lwhh1
+            - --events-port=8084
+            env:
+            - name: COS_BUCKET_URL
+              value: https://zhikuodu-1255429800.cos.ap-guangzhou.myqcloud.com
+            - name: COS_SECRET_ID
+              valueFrom:
+                secretKeyRef:
+                  name: cos-secret-job-xb62dnma
+                  key: secret-id
+            - name: COS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cos-secret-job-xb62dnma
+                  key: secret-key
+            - name: S3_BUCKET
+              value: zhikuodu-1255429800
+            - name: S3_REGION
+              value: ap-guangzhou
+            - name: S3_ENDPOINT
+              value: cos.ap-guangzhou.myqcloud.com
+            - name: RAY_CLUSTER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['ray.io/cluster']
+            volumeMounts:
+            - mountPath: /tmp/ray
+              name: historyserver
+          volumes:
+          - name: historyserver
+            emptyDir: {}
+          tolerations:
+          - key: ray
+            operator: Equal
+            value: cpu
+    
+    workerGroupSpecs:
+    - groupName: cpu-workers
+      replicas: 2
+      minReplicas: 1
+      maxReplicas: 2
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+          - name: ray-worker
+            image: rayproject/ray:2.46.0
+            env:
+            # ===== 新增：启用 Task Events =====
+            - name: RAY_ENABLE_TASK_EVENTS
+              value: "1"
+            - name: RAY_task_events_report_interval_ms
+              value: "1000"
+            resources:
+              limits:
+                cpu: "1"
+                memory: 2Gi
+              requests:
+                cpu: "1"
+                memory: 2Gi
+            volumeMounts:
+            - mountPath: /tmp/ray
+              name: historyserver
+            lifecycle:
+              postStart:
+                exec:
+                  command:
+                  - /bin/sh
+                  - -lc
+                  - --
+                  - |-
+                    GetNodeId(){
+                      while true; do
+                        nodeid=$(ps -ef | grep raylet | grep node_id | grep -v grep | grep -oP '(?<=--node_id=)[^ ]*')
+                        if [ -n "$nodeid" ]; then
+                          echo "$(date) raylet started: ${nodeid}" >> /tmp/ray/init.log
+                          echo $nodeid > /tmp/ray/raylet_node_id
+                          break
+                        else
+                          sleep 1
+                        fi
+                      done
+                    }
+                    GetNodeId
+          - name: collector
+            image: ccr.ccs.tencentyun.com/use-test/ray:collector-m010
+            imagePullPolicy: IfNotPresent
+            command:
+            - collector
+            - --role=Worker
+            - --runtime-class-name=cos
+            - --ray-cluster-name=$(RAY_CLUSTER_NAME)
+            - --ray-root-dir=mce-proj-bk0lwhh1
+            - --ray-cluster-id=mce-proj-bk0lwhh1
+            - --events-port=8084
+            env:
+            - name: COS_BUCKET_URL
+              value: https://zhikuodu-1255429800.cos.ap-guangzhou.myqcloud.com
+            - name: COS_SECRET_ID
+              valueFrom:
+                secretKeyRef:
+                  name: cos-secret-job-xb62dnma
+                  key: secret-id
+            - name: COS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cos-secret-job-xb62dnma
+                  key: secret-key
+            - name: S3_BUCKET
+              value: zhikuodu-1255429800
+            - name: S3_REGION
+              value: ap-guangzhou
+            - name: S3_ENDPOINT
+              value: cos.ap-guangzhou.myqcloud.com
+            - name: RAY_CLUSTER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['ray.io/cluster']
+            volumeMounts:
+            - mountPath: /tmp/ray
+              name: historyserver
+          volumes:
+          - name: historyserver
+            emptyDir: {}
+          tolerations:
+          - key: ray
+            operator: Equal
+            value: cpu
+  
+  # RayJob 特定配置
+  entrypoint: python /path/to/your/script.py  # 替换为你的实际入口
+  shutdownAfterJobFinishes: true
+  ttlSecondsAfterFinished: 600

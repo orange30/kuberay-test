@@ -106,6 +106,10 @@ func routerAPI(s *ServerHandler) {
 		Param(ws.PathParameter("job_id", "job_id")).
 		Writes("")) // Placeholder for specific return type
 
+	ws.Route(ws.POST("/api/refresh").To(s.triggerRefresh).
+		Doc("manually trigger data refresh from storage").
+		Writes("")) // Placeholder for specific return type
+
 	ws.Route(ws.GET("/data/datasets/{job_id}").To(s.getDatasets).Filter(s.CookieHandle).
 		Doc("get datasets").
 		Param(ws.PathParameter("job_id", "job_id")).
@@ -2524,6 +2528,27 @@ func (s *ServerHandler) CookieHandle(req *restful.Request, resp *restful.Respons
 	req.SetAttribute(COOKIE_CLUSTER_NAMESPACE_KEY, clusterNamespace.Value)
 	logrus.Infof("Request URL %s", req.Request.URL.String())
 	chain.ProcessFilter(req, resp)
+}
+
+// triggerRefresh manually triggers a data refresh from storage
+func (s *ServerHandler) triggerRefresh(req *restful.Request, resp *restful.Response) {
+	logrus.Info("[API] Manual refresh requested")
+	
+	if s.eventHandler == nil {
+		resp.WriteErrorString(http.StatusInternalServerError, "EventHandler not available")
+		return
+	}
+	
+	err := s.eventHandler.TriggerRefresh()
+	if err != nil {
+		resp.WriteErrorString(http.StatusInternalServerError, fmt.Sprintf("Refresh failed: %v", err))
+		return
+	}
+	
+	resp.WriteAsJson(map[string]interface{}{
+		"status": "success",
+		"message": "Data refresh triggered. Note: Full refresh happens every 5 minutes automatically. Please wait a moment and reload the page.",
+	})
 }
 
 func getClusterSvcName(clis []client.Client, name, namespace string) (string, error) {

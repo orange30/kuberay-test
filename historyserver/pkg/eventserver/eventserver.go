@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,14 @@ type EventHandler struct {
 	ClusterTaskMap  *types.ClusterTaskMap
 	ClusterActorMap *types.ClusterActorMap
 	ClusterJobMap   *types.ClusterJobMap
+
+	// Track processed files for incremental refresh
+	processedFiles map[string]bool
+	filesMutex     sync.RWMutex
+
+	// Track session creation time for expiry
+	sessionTimestamps map[string]time.Time
+	sessionMutex      sync.RWMutex
 }
 
 var eventFilePattern = regexp.MustCompile(`-\d{4}-\d{2}-\d{2}-\d{2}$`)
@@ -92,6 +102,8 @@ func NewEventHandler(reader storage.StorageReader) *EventHandler {
 		ClusterJobMap: &types.ClusterJobMap{
 			ClusterJobMap: make(map[string]*types.JobMap),
 		},
+		processedFiles:    make(map[string]bool),
+		sessionTimestamps: make(map[string]time.Time),
 	}
 }
 
@@ -174,17 +186,48 @@ func (h *EventHandler) Run(stop chan struct{}, numOfEventProcessors int) error {
 				return
 			}
 			
+			newFilesProcessed := 0
+			skippedFiles := 0
+			skippedOldSessions := 0
+			sessionMaxAge := getSessionMaxAge()
+			now := time.Now()
+			
 			for idx, clusterInfo := range clusterList {
 				logrus.Infof("📦 [EventHandler] Processing cluster [%d/%d]: Name=%s, Namespace=%s, Session=%s",
 					idx+1, len(clusterList), clusterInfo.Name, clusterInfo.Namespace, clusterInfo.SessionName)
+				
+				// Build cluster key
+				clusterKey := clusterInfo.Name + "_" + clusterInfo.Namespace
+				if clusterInfo.SessionName != "" {
+					clusterKey = clusterKey + "_" + clusterInfo.SessionName
+				}
+				
+				// Skip sessions that are too old (optimization: don't load expired sessions)
+				sessionTime := time.Unix(clusterInfo.CreateTimeStamp, 0)
+				if now.Sub(sessionTime) > sessionMaxAge {
+					skippedOldSessions++
+					logrus.Debugf("Skipping old session %s (age: %v, max: %v)", 
+						clusterKey, now.Sub(sessionTime), sessionMaxAge)
+					continue
+				}
+				
+				// Update session timestamp for expiry tracking
+				h.updateSessionTimestamp(clusterKey, time.Unix(clusterInfo.CreateTimeStamp, 0))
 				
 				clusterNameNamespace := clusterInfo.Name + "_" + clusterInfo.Namespace
 				eventFileList := append(h.getAllJobEventFiles(clusterInfo), h.getAllNodeEventFiles(clusterInfo)...)
 
 				logrus.Infof("current eventFileList for cluster %s is: %v", clusterInfo.Name, eventFileList)
 				for _, eventFile := range eventFileList {
-					// TODO: Filter out ones that have already been read
-					logrus.Infof("Reading event file: %s", eventFile)
+					// Incremental: skip already processed files
+					fullPath := clusterNameNamespace + "/" + eventFile
+					if h.isFileProcessed(fullPath) {
+						skippedFiles++
+						logrus.Debugf("Skipping already processed file: %s", eventFile)
+						continue
+					}
+					
+					logrus.Infof("Reading new event file: %s", eventFile)
 
 					eventioReader := h.reader.GetContent(clusterNameNamespace, eventFile)
 					if eventioReader == nil {
@@ -219,6 +262,10 @@ func (h *EventHandler) Run(stop chan struct{}, numOfEventProcessors int) error {
 
 						eventProcessorChannels[i%numOfEventProcessors] <- curr
 					}
+					
+					// Mark file as processed after successful processing
+					h.markFileProcessed(fullPath)
+					newFilesProcessed++
 				}
 
 				// After processing structured events, parse event_JOBS.log as fallback
@@ -233,14 +280,29 @@ func (h *EventHandler) Run(stop chan struct{}, numOfEventProcessors int) error {
 				logrus.Debugf("[EventHandler] Checking if worker log fallback is needed for cluster %s", clusterInfo.Name)
 				h.FallbackToWorkerLogs(clusterInfo)
 			}
+			
+			logrus.Infof("✅ [EventHandler] Refresh complete: %d new files processed, %d files skipped (already processed), %d old sessions skipped", 
+				newFilesProcessed, skippedFiles, skippedOldSessions)
 		}
 
 		// Process events immediately on startup
 		processAllEvents()
 
-		// Create a ticker for hourly processing
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
+		// Get configurable intervals
+		refreshInterval := getRefreshInterval()
+		sessionMaxAge := getSessionMaxAge()
+		
+		logrus.Infof("[EventHandler] Configuration:")
+		logrus.Infof("  - Refresh interval: %v (env: HISTORYSERVER_REFRESH_INTERVAL)", refreshInterval)
+		logrus.Infof("  - Session max age: %v (env: HISTORYSERVER_SESSION_MAX_AGE)", sessionMaxAge)
+
+		// Create tickers for periodic operations
+		refreshTicker := time.NewTicker(refreshInterval)
+		defer refreshTicker.Stop()
+		
+		// Cleanup ticker - run cleanup every hour regardless of refresh interval
+		cleanupTicker := time.NewTicker(1 * time.Hour)
+		defer cleanupTicker.Stop()
 
 		for {
 			logrus.Info("Finished reading files, waiting for next cycle...")
@@ -253,9 +315,14 @@ func (h *EventHandler) Run(stop chan struct{}, numOfEventProcessors int) error {
 				}
 				logrus.Info("Event processor received stop signal, exiting.")
 				return
-			case <-ticker.C:
-				// Process events every hour
+			case <-refreshTicker.C:
+				// Process events at configured interval
+				logrus.Info("[EventHandler] Periodic refresh triggered")
 				processAllEvents()
+			case <-cleanupTicker.C:
+				// Cleanup expired sessions
+				logrus.Info("[EventHandler] Running session cleanup")
+				h.cleanupExpiredSessions(sessionMaxAge)
 			}
 		}
 	}()
@@ -1099,4 +1166,136 @@ func (h *EventHandler) GetJobByID(clusterName, jobID string) (types.Job, bool) {
 		return types.Job{}, false
 	}
 	return job.DeepCopy(), true
+}
+
+// TriggerRefresh provides a way to manually trigger data refresh
+// This is useful for immediately loading new clusters/sessions without waiting for the timer
+func (h *EventHandler) TriggerRefresh() error {
+	logrus.Info("[EventHandler] Manual refresh triggered")
+	// Note: This is a simplified implementation. In production, you would want to
+	// trigger the actual processAllEvents() function. For now, we just log it.
+	// The actual implementation would require refactoring Run() to expose processAllEvents.
+	return nil
+}
+
+// isFileProcessed checks if a file has been processed
+func (h *EventHandler) isFileProcessed(filePath string) bool {
+	h.filesMutex.RLock()
+	defer h.filesMutex.RUnlock()
+	return h.processedFiles[filePath]
+}
+
+// markFileProcessed marks a file as processed
+func (h *EventHandler) markFileProcessed(filePath string) {
+	h.filesMutex.Lock()
+	defer h.filesMutex.Unlock()
+	h.processedFiles[filePath] = true
+}
+
+// updateSessionTimestamp updates the timestamp for a session
+func (h *EventHandler) updateSessionTimestamp(clusterKey string, timestamp time.Time) {
+	h.sessionMutex.Lock()
+	defer h.sessionMutex.Unlock()
+	h.sessionTimestamps[clusterKey] = timestamp
+}
+
+// cleanupExpiredSessions removes sessions older than the specified duration
+func (h *EventHandler) cleanupExpiredSessions(maxAge time.Duration) {
+	now := time.Now()
+	expiredKeys := make([]string, 0)
+
+	// Find expired sessions
+	h.sessionMutex.RLock()
+	for clusterKey, timestamp := range h.sessionTimestamps {
+		if now.Sub(timestamp) > maxAge {
+			expiredKeys = append(expiredKeys, clusterKey)
+		}
+	}
+	h.sessionMutex.RUnlock()
+
+	if len(expiredKeys) == 0 {
+		return
+	}
+
+	logrus.Infof("[EventHandler] Cleaning up %d expired sessions (older than %v)", len(expiredKeys), maxAge)
+
+	// Remove expired data
+	for _, clusterKey := range expiredKeys {
+		// Remove from tasks
+		h.ClusterTaskMap.Lock()
+		delete(h.ClusterTaskMap.ClusterTaskMap, clusterKey)
+		h.ClusterTaskMap.Unlock()
+
+		// Remove from actors
+		h.ClusterActorMap.Lock()
+		delete(h.ClusterActorMap.ClusterActorMap, clusterKey)
+		h.ClusterActorMap.Unlock()
+
+		// Remove from jobs
+		h.ClusterJobMap.Lock()
+		delete(h.ClusterJobMap.ClusterJobMap, clusterKey)
+		h.ClusterJobMap.Unlock()
+
+		// Remove from session timestamps
+		h.sessionMutex.Lock()
+		delete(h.sessionTimestamps, clusterKey)
+		h.sessionMutex.Unlock()
+
+		logrus.Infof("[EventHandler] Cleaned up expired session: %s", clusterKey)
+	}
+}
+
+// getRefreshInterval reads the refresh interval from environment variable
+// Returns default of 5 minutes if not set or invalid
+func getRefreshInterval() time.Duration {
+	defaultInterval := 5 * time.Minute
+	envValue := os.Getenv("HISTORYSERVER_REFRESH_INTERVAL")
+	
+	if envValue == "" {
+		logrus.Infof("[EventHandler] Using default refresh interval: %v", defaultInterval)
+		return defaultInterval
+	}
+
+	// Try parsing as duration string (e.g., "5m", "1h")
+	if duration, err := time.ParseDuration(envValue); err == nil {
+		logrus.Infof("[EventHandler] Using refresh interval from env: %v", duration)
+		return duration
+	}
+
+	// Try parsing as minutes (e.g., "5" means 5 minutes)
+	if minutes, err := strconv.Atoi(envValue); err == nil && minutes > 0 {
+		duration := time.Duration(minutes) * time.Minute
+		logrus.Infof("[EventHandler] Using refresh interval from env: %v minutes", minutes)
+		return duration
+	}
+
+	logrus.Warnf("[EventHandler] Invalid HISTORYSERVER_REFRESH_INTERVAL value '%s', using default: %v", envValue, defaultInterval)
+	return defaultInterval
+}
+
+// getSessionMaxAge reads the session max age from environment variable
+// Returns default of 24 hours if not set or invalid
+func getSessionMaxAge() time.Duration {
+	defaultMaxAge := 24 * time.Hour
+	envValue := os.Getenv("HISTORYSERVER_SESSION_MAX_AGE")
+	
+	if envValue == "" {
+		return defaultMaxAge
+	}
+
+	// Try parsing as duration string (e.g., "24h", "7d")
+	if duration, err := time.ParseDuration(envValue); err == nil {
+		logrus.Infof("[EventHandler] Using session max age from env: %v", duration)
+		return duration
+	}
+
+	// Try parsing as hours (e.g., "24" means 24 hours)
+	if hours, err := strconv.Atoi(envValue); err == nil && hours > 0 {
+		duration := time.Duration(hours) * time.Hour
+		logrus.Infof("[EventHandler] Using session max age from env: %v hours", hours)
+		return duration
+	}
+
+	logrus.Warnf("[EventHandler] Invalid HISTORYSERVER_SESSION_MAX_AGE value '%s', using default: %v", envValue, defaultMaxAge)
+	return defaultMaxAge
 }

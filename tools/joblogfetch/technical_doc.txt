@@ -1,0 +1,80 @@
+joblogfetch：在 Ray 运行态/归档态下获取 Job Driver Log
+==================================================
+
+1. 简介
+--------------------------------------------------
+面向读者：开发 Partner
+
+joblogfetch 是一个 CLI 工具。
+核心目标：只提供 submission_id，自动定位 Job 的 driver_node_id，从 Ray Dashboard API 拉取日志流式输出。
+
+
+2. 关键依赖与前置条件
+--------------------------------------------------
+结论：Live Ray Dashboard 与 HistoryServer 至少一个可用。如果是 HistoryServer，还需 COS 可访问。
+
+1) Live Ray Dashboard 或 HistoryServer 至少存在一个
+- Live Dashboard: 查运行中作业。
+- HistoryServer: 查已结束作业 (需 Cookie 传递上下文)。
+
+2) COS (对象存储) 可访问
+- HistoryServer 依赖 COS 读取归档日志。网络需互通。
+
+3) TKE 集群环境
+- 需依赖 clusterName 和 namespace 进行归档筛选。
+
+
+3. 核心思路
+--------------------------------------------------
+1. 确定查询源: 优先 Live，失败转 History。
+2. 定位 Driver Node: 查 Job 详情 -> 提取 driver_node_id。
+3. 拉取日志: 用 driver_node_id + filename 请求 API。
+
+输出策略:
+- Stderr: 过程日志。
+- Stdout: 纯日志内容。
+
+
+4. 详细执行流程 (代码映射)
+--------------------------------------------------
+Step 0: 参数解析
+-cluster, -submission-id (必填)
+
+Step 1: 探活 Live
+- TCP Dial / HTTP GET /api/version
+- 成功 -> Step 1.1 直查。
+- 失败 -> Step 2 History。
+
+Step 2: History - 确定 Session
+- 自动请求 GET /clusters/，按时间倒序匹配 clusterName。
+
+Step 3: History - 定位 Driver
+- 带 Cookie 请求 GET /api/jobs/{id}。
+
+Step 4: 拉取
+- GET /api/v0/logs/file，流式 Copy 到 Stdout。
+
+
+5. 依赖接口清单
+--------------------------------------------------
+- /api/version (探活)
+- /clusters/ (归档列表)
+- /api/jobs/{id} (Job详情)
+- /api/v0/logs/file (日志文件)
+
+
+6. 使用示例
+--------------------------------------------------
+编译:
+go build -o joblogfetch .
+
+运行:
+./joblogfetch -cluster raycluster-3 -submission-id xxxx > driver.log
+
+
+7. 常见排障
+--------------------------------------------------
+- Live 探活失败: 检查网络/端口。
+- 找不到 Session: 检查 ClusterName 是否匹配。
+- 拉取失败: 检查 Cookie 或 COS 权限。
+- Stdout 为空: 检查 Stderr 报错。
