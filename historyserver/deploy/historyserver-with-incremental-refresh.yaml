@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: historyserver-demo
+  namespace: mce-proj-production-001
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: historyserver
+  template:
+    metadata:
+      labels:
+        app: historyserver
+    spec:
+      serviceAccountName: historyserver
+      containers:
+      - name: historyserver
+        image: ccr.ccs.tencentyun.com/use-test/ray:historyserver-latest
+        command:
+        - historyserver
+        - --runtime-class-name=cos
+        - --ray-root-dir=mce-proj-production-001
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 500m
+            memory: 1Gi
+          requests:
+            cpu: 200m
+            memory: 512Mi
+        env:
+        # ===== 增量刷新配置 =====
+        # 数据刷新间隔 (默认: 5m)
+        # 支持格式: "1m", "5m", "1h" 或数字表示分钟 "5"
+        - name: HISTORYSERVER_REFRESH_INTERVAL
+          value: "5m"
+        
+        # 数据保留时间 (默认: 24h)
+        # 超过此时间的 session 会被自动清理
+        # 支持格式: "24h", "48h" 或数字表示小时 "24"
+        - name: HISTORYSERVER_SESSION_MAX_AGE
+          value: "24h"
+        
+        # ===== COS 配置 =====
+        - name: COS_BUCKET_URL
+          value: https://zhikuodu-1255429800.cos.ap-guangzhou.myqcloud.com
+        - name: COS_SECRET_ID
+          valueFrom:
+            secretKeyRef:
+              key: secret-id
+              name: mce-cos-secret
+        - name: COS_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              key: secret-key
+              name: mce-cos-secret
+        
+        # ===== 监控配置 =====
+        - name: RAY_GRAFANA_IFRAME_HOST
+          value: http://118.25.169.144:5001
+        - name: RAY_GRAFANA_HOST
+          value: http://118.25.169.144:5001
+        - name: RAY_PROMETHEUS_HOST
+          value: http://118.25.169.144:5002
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: historyserver
+  namespace: mce-proj-production-001
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+  selector:
+    app: historyserver

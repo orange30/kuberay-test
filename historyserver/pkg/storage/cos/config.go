@@ -7,9 +7,10 @@ import (
 )
 
 type config struct {
-	BucketURL string
-	SecretID  string
-	SecretKey string
+	BucketURL    string
+	SecretID     string
+	SecretKey    string
+	SessionToken string  // 支持临时密钥
 	types.RayCollectorConfig
 }
 
@@ -17,6 +18,7 @@ func (c *config) complete(rcc *types.RayCollectorConfig, jd map[string]interface
 	c.RayCollectorConfig = *rcc
 	c.SecretID = os.Getenv("COS_SECRET_ID")
 	c.SecretKey = os.Getenv("COS_SECRET_KEY")
+	c.SessionToken = os.Getenv("COS_SESSION_TOKEN")  // 支持临时密钥
 	
 	if len(jd) == 0 {
 		c.BucketURL = os.Getenv("COS_BUCKET_URL")
@@ -33,6 +35,7 @@ func (c *config) completeHSConfig(rcc *types.RayHistoryServerConfig, jd map[stri
 	}
 	c.SecretID = os.Getenv("COS_SECRET_ID")
 	c.SecretKey = os.Getenv("COS_SECRET_KEY")
+	c.SessionToken = os.Getenv("COS_SESSION_TOKEN")  // 支持临时密钥
 	
 	if len(jd) == 0 {
 		c.BucketURL = os.Getenv("COS_BUCKET_URL")

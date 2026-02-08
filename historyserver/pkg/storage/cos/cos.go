@@ -183,8 +183,9 @@ func New(c *config) (*CosHandler, error) {
 	b := &cos.BaseURL{BucketURL: u}
 	client := cos.NewClient(b, &http.Client{
 		Transport: &cos.AuthorizationTransport{
-			SecretID:  c.SecretID,
-			SecretKey: c.SecretKey,
+			SecretID:     c.SecretID,
+			SecretKey:    c.SecretKey,
+			SessionToken: c.SessionToken,  // 支持临时密钥
 		},
 	})
 
