@@ -318,6 +318,13 @@ func (h *EventHandler) Run(stop chan struct{}, numOfEventProcessors int) error {
 			case <-refreshTicker.C:
 				// Process events at configured interval
 				logrus.Info("[EventHandler] Periodic refresh triggered")
+				
+				// Reload credentials before processing (for temporary credential rotation)
+				if err := h.reader.ReloadCredentials(); err != nil {
+					logrus.Errorf("[EventHandler] Failed to reload credentials: %v", err)
+					// Continue anyway - will retry next cycle
+				}
+				
 				processAllEvents()
 			case <-cleanupTicker.C:
 				// Cleanup expired sessions

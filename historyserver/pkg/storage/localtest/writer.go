@@ -53,3 +53,7 @@ func (w *MockWriter) HasDirectory(path string) bool {
 func NewWriter(c *types.RayHistoryServerConfig, jd map[string]interface{}) (storage.StorageWriter, error) {
 	return NewMockWriter(), nil
 }
+// ReloadCredentials is not needed for mock writer
+func (m *MockWriter) ReloadCredentials() error {
+	return nil // No-op for mock writer
+}

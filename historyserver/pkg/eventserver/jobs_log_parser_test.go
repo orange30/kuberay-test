@@ -42,6 +42,8 @@ func (m *mockStorageForJobsLog) GetContent(clusterNameID, filePath string) io.Re
 
 func (m *mockStorageForJobsLog) List() []utils.ClusterInfo { return nil }
 
+func (m *mockStorageForJobsLog) ReloadCredentials() error { return nil }
+
 func TestParseEntrypointFromDriverLog(t *testing.T) {
 	log := strings.Join([]string{
 		"2026-01-19 00:00:00,000 INFO something: boot",

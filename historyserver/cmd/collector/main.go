@@ -96,6 +96,31 @@ func main() {
 	collector := runtime.NewCollector(&globalConfig, writer)
 	_ = collector.Start(context.TODO().Done())
 
+	// Start credential reload goroutine for temporary credentials rotation
+	go func() {
+		// Read reload interval from environment variable, default to 5 minutes
+		reloadInterval := 5 * time.Minute
+		if intervalStr := os.Getenv("COLLECTOR_CREDENTIAL_RELOAD_INTERVAL"); intervalStr != "" {
+			if parsed, err := time.ParseDuration(intervalStr); err == nil {
+				reloadInterval = parsed
+			} else {
+				logrus.Warnf("Invalid COLLECTOR_CREDENTIAL_RELOAD_INTERVAL: %s, using default 5m", intervalStr)
+			}
+		}
+		
+		logrus.Infof("[Collector] Credential reload interval: %v (env: COLLECTOR_CREDENTIAL_RELOAD_INTERVAL)", reloadInterval)
+		
+		ticker := time.NewTicker(reloadInterval)
+		defer ticker.Stop()
+		
+		for range ticker.C {
+			logrus.Debug("[Collector] Reloading credentials...")
+			if err := writer.ReloadCredentials(); err != nil {
+				logrus.Errorf("[Collector] Failed to reload credentials: %v", err)
+			}
+		}
+	}()
+
 	eventStop := eventServer.WaitForStop()
 	logStop := collector.WaitForStop()
 	<-eventStop

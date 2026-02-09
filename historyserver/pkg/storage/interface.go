@@ -10,6 +10,10 @@ import (
 type StorageWriter interface {
 	CreateDirectory(path string) error
 	WriteFile(file string, reader io.ReadSeeker) error
+	
+	// ReloadCredentials reloads credentials from file/env (for temporary credentials rotation)
+	// Returns error if reload fails, nil if successful or not supported
+	ReloadCredentials() error
 }
 
 // HistoryServer create readers for each storage runtime
@@ -23,4 +27,8 @@ type StorageReader interface {
 	GetContent(clusterId string, fileName string) io.Reader
 
 	ListFiles(clusterId string, dir string) []string
+	
+	// ReloadCredentials reloads credentials from file/env (for temporary credentials rotation)
+	// Returns error if reload fails, nil if successful or not supported
+	ReloadCredentials() error
 }

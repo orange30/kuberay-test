@@ -79,3 +79,7 @@ func (r *MockReader) ListFiles(clusterId string, dir string) []string {
 func NewReader(c *types.RayHistoryServerConfig, jd map[string]interface{}) (storage.StorageReader, error) {
 	return NewMockReader(), nil
 }
+// ReloadCredentials is not needed for localtest
+func (m *MockReader) ReloadCredentials() error {
+	return nil // No-op for mock reader
+}

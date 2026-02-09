@@ -228,6 +228,11 @@ func NewReader(c *types.RayHistoryServerConfig, jd map[string]interface{}) (stor
 	return New(config)
 }
 
+// ReloadCredentials is not supported for Aliyun OSS (uses static credentials or STS)
+func (r *RayLogsHandler) ReloadCredentials() error {
+	return nil // No-op for Aliyun OSS
+}
+
 func NewWriter(c *types.RayCollectorConfig, jd map[string]interface{}) (storage.StorageWriter, error) {
 	config := &config{}
 	config.complete(c, jd)

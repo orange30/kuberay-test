@@ -265,6 +265,11 @@ func NewReader(c *types.RayHistoryServerConfig, jd map[string]interface{}) (stor
 	return New(config)
 }
 
+// ReloadCredentials is not supported for S3 (uses IAM roles or static credentials)
+func (r *RayLogsHandler) ReloadCredentials() error {
+	return nil // No-op for S3
+}
+
 func NewWriter(c *types.RayCollectorConfig, jd map[string]interface{}) (storage.StorageWriter, error) {
 	config := &config{}
 	config.complete(c, jd)

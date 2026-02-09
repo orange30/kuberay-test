@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: historyserver-demo
+  namespace: mce-proj-production-009
+  labels:
+    app: historyserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: historyserver
+  template:
+    metadata:
+      labels:
+        app: historyserver
+    spec:
+      serviceAccountName: historyserver
+      # ✅ Volume 定义：挂载 Secret 为文件
+      volumes:
+      - name: cos-credentials
+        secret:
+          # ⚠️ 使用现有 Secret 名称
+          secretName: cos-secret-proj-production-009
+          items:
+          - key: secret-id
+            path: secret-id
+          - key: secret-key
+            path: secret-key
+          - key: session-token
+            path: session-token
+          optional: false
+      containers:
+      - name: historyserver
+        image: ccr.ccs.tencentyun.com/use-test/ray:historyserver-m042  # 📝 使用新镜像
+        imagePullPolicy: IfNotPresent
+        command:
+        - historyserver
+        - --runtime-class-name=cos
+        - --ray-root-dir=mce-proj-production-009
+        env:
+        - name: COS_BUCKET_URL
+          value: https://zhikuodu-1255429800.cos.ap-guangzhou.myqcloud.com
+        # ✅ 修改：使用文件路径环境变量，而非直接值
+        - name: COS_SECRET_ID_FILE
+          value: /etc/cos-credentials/secret-id
+        - name: COS_SECRET_KEY_FILE
+          value: /etc/cos-credentials/secret-key
+        - name: COS_SESSION_TOKEN_FILE
+          value: /etc/cos-credentials/session-token
+        - name: RAY_GRAFANA_IFRAME_HOST
+          value: http://118.25.169.144:5001
+        - name: RAY_GRAFANA_HOST
+          value: http://118.25.169.144:5001
+        - name: RAY_PROMETHEUS_HOST
+          value: http://118.25.169.144:5002
+        - name: HISTORYSERVER_REFRESH_INTERVAL
+          value: 5m
+        - name: HISTORYSERVER_SESSION_MAX_AGE
+          value: 72h
+        # ✅ 挂载 Secret Volume 到 /etc/cos-credentials
+        volumeMounts:
+        - name: cos-credentials
+          mountPath: /etc/cos-credentials
+          readOnly: true
+        ports:
+        - containerPort: 8080
+        resources:
+          limits:
+            cpu: 500m

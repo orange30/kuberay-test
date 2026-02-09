@@ -25,6 +25,11 @@ type CosHandler struct {
 	RayClusterName string
 	RayClusterID   string
 	RayNodeName    string
+	// For credential reloading
+	BucketURL        string
+	HSConfig         *types.RayHistoryServerConfig  // HistoryServer mode
+	CollectorConfig  *types.RayCollectorConfig      // Collector mode
+	jsonData         map[string]interface{}
 }
 
 func (h *CosHandler) CreateDirectory(d string) error {
@@ -195,17 +200,75 @@ func New(c *config) (*CosHandler, error) {
 		RayClusterName: c.RayClusterName,
 		RayClusterID:   c.RayClusterID,
 		RayNodeName:    c.RayNodeName,
+		BucketURL:      c.BucketURL,
 	}, nil
+}
+
+// ReloadCredentials reloads COS credentials from file/env and recreates the client
+// This is called periodically to support temporary credential rotation
+// Supports both HistoryServer mode and Collector mode
+func (h *CosHandler) ReloadCredentials() error {
+	// Only reload if we have config (either HSConfig or CollectorConfig)
+	if h.HSConfig == nil && h.CollectorConfig == nil {
+		return nil // No config available, skip reload
+	}
+	
+	logrus.Debug("[COS] Reloading credentials from file/env")
+	
+	// Re-read credentials from file/env
+	config := &config{}
+	if h.HSConfig != nil {
+		// HistoryServer mode
+		config.completeHSConfig(h.HSConfig, h.jsonData)
+	} else if h.CollectorConfig != nil {
+		// Collector mode
+		config.complete(h.CollectorConfig, h.jsonData)
+	}
+	
+	// Create new client with updated credentials
+	u, err := url.Parse(config.BucketURL)
+	if err != nil {
+		return fmt.Errorf("invalid COS Bucket URL during reload: %v", err)
+	}
+	
+	b := &cos.BaseURL{BucketURL: u}
+	newClient := cos.NewClient(b, &http.Client{
+		Transport: &cos.AuthorizationTransport{
+			SecretID:     config.SecretID,
+			SecretKey:    config.SecretKey,
+			SessionToken: config.SessionToken,
+		},
+	})
+	
+	// Atomically replace the client
+	h.Client = newClient
+	logrus.Debug("[COS] Credentials reloaded successfully")
+	
+	return nil
 }
 
 func NewReader(c *types.RayHistoryServerConfig, jd map[string]interface{}) (storage.StorageReader, error) {
 	config := &config{}
 	config.completeHSConfig(c, jd)
-	return New(config)
+	handler, err := New(config)
+	if err != nil {
+		return nil, err
+	}
+	// Save config for credential reloading
+	handler.HSConfig = c
+	handler.jsonData = jd
+	return handler, nil
 }
 
 func NewWriter(c *types.RayCollectorConfig, jd map[string]interface{}) (storage.StorageWriter, error) {
 	config := &config{}
 	config.complete(c, jd)
-	return New(config)
+	handler, err := New(config)
+	if err != nil {
+		return nil, err
+	}
+	// Save config for credential reloading in Collector mode
+	handler.CollectorConfig = c
+	handler.jsonData = jd
+	return handler, nil
 }

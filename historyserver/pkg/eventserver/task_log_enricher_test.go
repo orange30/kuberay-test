@@ -27,6 +27,10 @@ func (m *mockStorageForEnrich) List() []utils.ClusterInfo {
 	return nil
 }
 
+func (m *mockStorageForEnrich) ReloadCredentials() error {
+	return nil
+}
+
 func TestEnrichTasksFromLogs(t *testing.T) {
 	// Setup mock storage with log files
 	mock := &mockStorageForEnrich{
