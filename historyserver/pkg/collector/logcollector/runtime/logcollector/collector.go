@@ -153,6 +153,13 @@ func (r *RayLogHandler) processSessionLatestLogs() {
 			return nil
 		}
 
+		// Skip hidden files (starting with .) and .metadata files
+		filename := info.Name()
+		if strings.HasPrefix(filename, ".") || strings.HasSuffix(filename, ".metadata") {
+			logrus.Debugf("Skipping metadata/hidden file: %s", path)
+			return nil
+		}
+
 		// Process log file with the real session ID and node ID
 		if err := r.processSessionLatestLogFile(path, sessionID, nodeID); err != nil {
 			logrus.Errorf("Failed to process session_latest log file %s: %v", path, err)
@@ -547,6 +554,13 @@ func (r *RayLogHandler) processPrevLogsDir(sessionNodeDir string) {
 
 		// Skip directories
 		if info.IsDir() {
+			return nil
+		}
+
+		// Skip hidden files (starting with .) and .metadata files
+		filename := info.Name()
+		if strings.HasPrefix(filename, ".") || strings.HasSuffix(filename, ".metadata") {
+			logrus.Debugf("Skipping metadata/hidden file: %s", path)
 			return nil
 		}
 
